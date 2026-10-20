@@ -1,0 +1,608 @@
+/*
+ * Floppy//144 - projection-neutral Site model implementation
+ *
+ * Runtime Site geometry is generated from site_layout.jsonc by the
+ * development-only Site compiler. The game never parses JSONC at runtime.
+ */
+
+#include "floppy144_site.h"
+
+#include "floppy144_room.h"
+
+#include <stddef.h>
+
+/*
+ * Pull only the physical rectangles from the generated Site definition.
+ * Room metadata/topology macros deliberately expand to nothing here.
+ */
+static const Floppy144SiteRect floppy144_site_rects[] =
+{
+    #define SITE_META(site_width, site_height, spawn_x16, spawn_y16, spawn_room)
+    #define SITE_ROOM_REGION(room, x, y, width, height)
+    #define SITE_ROOM_DEF(room, first_region, region_count)
+
+    #define SITE_GEOMETRY(room, type, x, y, width, height) \
+        { (uint8_t)(type), (uint8_t)(room), (uint8_t)(room), (uint8_t)(room), \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), 0U, \
+          (uint16_t)((width) * FLOPPY144_SITE_FIXED_ONE), \
+          (uint16_t)((height) * FLOPPY144_SITE_FIXED_ONE) },
+
+    #define SITE_ROTATED_GEOMETRY(room, type, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation) \
+        { (uint8_t)(type), (uint8_t)(room), (uint8_t)(room), (uint8_t)(room), \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), (int16_t)(rotation), \
+          (uint16_t)(width16), (uint16_t)(height16) },
+
+    #define SITE_BOUNDARY(room, type, from_room, to_room, x, y, width, height) \
+        { (uint8_t)(type), (uint8_t)(room), (uint8_t)(from_room), (uint8_t)(to_room), \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), 0U, \
+          (uint16_t)((width) * FLOPPY144_SITE_FIXED_ONE), \
+          (uint16_t)((height) * FLOPPY144_SITE_FIXED_ONE) },
+
+    #define SITE_ROTATED_BOUNDARY(room, type, from_room, to_room, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation) \
+        { (uint8_t)(type), (uint8_t)(room), (uint8_t)(from_room), (uint8_t)(to_room), \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), (int16_t)(rotation), \
+          (uint16_t)(width16), (uint16_t)(height16) },
+
+    /* Legacy macros keep stale generated files buildable during migration. */
+    #define SITE_DOOR(from_room, to_room, x, y, width, height) \
+        { (uint8_t)FLOPPY144_SITE_DOOR, \
+          (uint8_t)(((from_room) == FLOPPY144_SITE_ROOM_OUTSIDE) ? (to_room) : (from_room)), \
+          (uint8_t)(from_room), (uint8_t)(to_room), \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), 0U, \
+          (uint16_t)((width) * FLOPPY144_SITE_FIXED_ONE), \
+          (uint16_t)((height) * FLOPPY144_SITE_FIXED_ONE) },
+
+    #define SITE_SHARED(type, x, y, width, height) \
+        { (uint8_t)(type), (uint8_t)FLOPPY144_SITE_ROOM_SHARED, \
+          (uint8_t)FLOPPY144_SITE_ROOM_SHARED, (uint8_t)FLOPPY144_SITE_ROOM_SHARED, \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), 0U, \
+          (uint16_t)((width) * FLOPPY144_SITE_FIXED_ONE), \
+          (uint16_t)((height) * FLOPPY144_SITE_FIXED_ONE) },
+
+    #define SITE_ROTATED_SHARED(type, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation) \
+        { (uint8_t)(type), (uint8_t)FLOPPY144_SITE_ROOM_SHARED, \
+          (uint8_t)FLOPPY144_SITE_ROOM_SHARED, (uint8_t)FLOPPY144_SITE_ROOM_SHARED, \
+          (uint8_t)(x), (uint8_t)(y), (uint8_t)(width), (uint8_t)(height), (int16_t)(rotation), \
+          (uint16_t)(width16), (uint16_t)(height16) },
+
+    #include "floppy144_site_generated.def"
+
+    #undef SITE_ROTATED_SHARED
+    #undef SITE_SHARED
+    #undef SITE_DOOR
+    #undef SITE_ROTATED_BOUNDARY
+    #undef SITE_BOUNDARY
+    #undef SITE_ROTATED_GEOMETRY
+    #undef SITE_GEOMETRY
+    #undef SITE_ROOM_DEF
+    #undef SITE_ROOM_REGION
+    #undef SITE_META
+};
+
+#define FLOPPY144_SITE_RECT_COUNT \
+((uint32_t)(sizeof(floppy144_site_rects) / sizeof(floppy144_site_rects[0])))
+
+/* Pull the compiled spawn point from the same generated source. */
+#define SITE_META(site_width, site_height, spawn_x16, spawn_y16, spawn_room) \
+    static const int32_t floppy144_site_spawn_x16 = (int32_t)(spawn_x16); \
+    static const int32_t floppy144_site_spawn_y16 = (int32_t)(spawn_y16);
+#define SITE_ROOM_REGION(room, x, y, width, height)
+#define SITE_ROOM_DEF(room, first_region, region_count)
+#define SITE_GEOMETRY(room, type, x, y, width, height)
+#define SITE_ROTATED_GEOMETRY(room, type, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation)
+#define SITE_BOUNDARY(room, type, from_room, to_room, x, y, width, height)
+#define SITE_ROTATED_BOUNDARY(room, type, from_room, to_room, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation)
+#define SITE_DOOR(from_room, to_room, x, y, width, height)
+#define SITE_SHARED(type, x, y, width, height)
+#define SITE_ROTATED_SHARED(type, x, y, width, height, centre_x16, centre_y16, width16, height16, rotation)
+#include "floppy144_site_generated.def"
+#undef SITE_ROTATED_SHARED
+#undef SITE_SHARED
+#undef SITE_DOOR
+#undef SITE_ROTATED_BOUNDARY
+#undef SITE_BOUNDARY
+#undef SITE_ROTATED_GEOMETRY
+#undef SITE_GEOMETRY
+#undef SITE_ROOM_DEF
+#undef SITE_ROOM_REGION
+#undef SITE_META
+
+#define FLOPPY144_SITE_MIN_X16 0
+#define FLOPPY144_SITE_MIN_Y16 0
+#define FLOPPY144_SITE_MAX_X16 \
+    (FLOPPY144_SITE_SIZE_UNITS * FLOPPY144_SITE_FIXED_ONE)
+#define FLOPPY144_SITE_MAX_Y16 \
+    (FLOPPY144_SITE_SIZE_UNITS * FLOPPY144_SITE_FIXED_ONE)
+
+uint32_t Floppy144SiteRectCount(
+    void
+)
+{
+    return FLOPPY144_SITE_RECT_COUNT;
+}
+
+const Floppy144SiteRect *Floppy144SiteRectAt(
+    uint32_t index
+)
+{
+    if(index >= FLOPPY144_SITE_RECT_COUNT)
+    {
+        return NULL;
+    }
+
+    return &floppy144_site_rects[index];
+}
+
+bool Floppy144SiteElementBlocksMovement(
+    Floppy144SiteElement element
+)
+{
+    if((uint32_t)element >= (uint32_t)FLOPPY144_SITE_ELEMENT_COUNT)
+    {
+        return true;
+    }
+
+    /*
+     * Wall-mounted fixtures live on the Wall-Hangings visual/interaction
+     * layer. Their generated 1U footprint is retained for targeting, labels
+     * and physical-item parenting, but it must not consume walkable floor.
+     * The wall/boundary geometry behind the fixture already supplies the
+     * correct physical collision.
+     */
+    if(element == FLOPPY144_SITE_WALL_MOUNTED_ITEM)
+    {
+        return false;
+    }
+
+    return element > FLOPPY144_SITE_DOOR;
+}
+
+static bool Floppy144SiteElementIsWalkableGround(
+    uint8_t type
+)
+{
+    return
+        (type <= (uint8_t)FLOPPY144_SITE_FLOOR_D) ||
+        type == (uint8_t)FLOPPY144_SITE_DOOR;
+}
+
+static bool Floppy144SiteRectContainsCell(
+    const Floppy144SiteRect *rect,
+    uint8_t x,
+    uint8_t y
+)
+{
+    uint16_t max_x;
+    uint16_t max_y;
+
+    if(rect == NULL)
+    {
+        return false;
+    }
+
+    max_x = (uint16_t)rect->x + (uint16_t)rect->width;
+    max_y = (uint16_t)rect->y + (uint16_t)rect->height;
+
+    return
+        (uint16_t)x >= (uint16_t)rect->x &&
+        (uint16_t)x < max_x &&
+        (uint16_t)y >= (uint16_t)rect->y &&
+        (uint16_t)y < max_y;
+}
+
+static bool Floppy144SiteCellHasWalkableGroundFiltered(
+    uint8_t x,
+    uint8_t y,
+    Floppy144SiteCollisionFilter filter,
+    void *context
+)
+{
+    uint32_t index;
+
+    for(index = 0U; index < FLOPPY144_SITE_RECT_COUNT; ++index)
+    {
+        const Floppy144SiteRect *rect = &floppy144_site_rects[index];
+
+        if(
+            Floppy144SiteElementIsWalkableGround(rect->type) &&
+            Floppy144SiteRectContainsCell(rect, x, y) &&
+            (
+                filter == NULL ||
+                filter(rect, context)
+            )
+        )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Floppy144SitePositionBlockedFiltered(
+    int32_t centre_x16,
+    int32_t centre_y16,
+    Floppy144SiteCollisionFilter filter,
+    void *context
+)
+{
+    const int32_t half_player_width =
+    FLOPPY144_SITE_PLAYER_COLLISION_WIDTH_X16 / 2;
+
+    /*
+     * Canonical Site coordinates now match the player-facing view directly.
+     * The persistent player position is the sprite's foot point, so the
+     * collision footprint is centred horizontally on X and extends upward
+     * (negative Y) from that foot point.
+     */
+    const int32_t player_x0 =
+    centre_x16 -
+    half_player_width;
+
+    const int32_t player_x1 =
+    centre_x16 +
+    half_player_width;
+
+    const int32_t player_y0 =
+    centre_y16 -
+    FLOPPY144_SITE_PLAYER_COLLISION_DEPTH_X16;
+
+    const int32_t player_y1 =
+    centre_y16;
+
+    uint32_t index;
+    int32_t cell_x0;
+    int32_t cell_x1;
+    int32_t cell_y0;
+    int32_t cell_y1;
+    int32_t cell_x;
+    int32_t cell_y;
+
+    if(
+        player_x0 < FLOPPY144_SITE_MIN_X16 ||
+        player_y0 < FLOPPY144_SITE_MIN_Y16 ||
+        player_x1 > FLOPPY144_SITE_MAX_X16 ||
+        player_y1 > FLOPPY144_SITE_MAX_Y16
+    )
+    {
+        return true;
+    }
+
+    /*
+     * Empty JSONC space is not walkable. The entire player footprint must be
+     * supported by currently visible generated FLOOR_* or DOOR geometry.
+     * Applying the same runtime filter here as the blocking pass prevents an
+     * unreconstructed room or hidden internal door from leaving a walkable
+     * "ghost threshold" in an otherwise solid wall.
+     */
+    cell_x0 = player_x0 / FLOPPY144_SITE_FIXED_ONE;
+    cell_y0 = player_y0 / FLOPPY144_SITE_FIXED_ONE;
+    cell_x1 = (player_x1 - 1) / FLOPPY144_SITE_FIXED_ONE;
+    cell_y1 = (player_y1 - 1) / FLOPPY144_SITE_FIXED_ONE;
+
+    for(cell_y = cell_y0; cell_y <= cell_y1; ++cell_y)
+    {
+        for(cell_x = cell_x0; cell_x <= cell_x1; ++cell_x)
+        {
+            if(
+                !Floppy144SiteCellHasWalkableGroundFiltered(
+                    (uint8_t)cell_x,
+                    (uint8_t)cell_y,
+                    filter,
+                    context
+                )
+            )
+            {
+                return true;
+            }
+        }
+    }
+
+    for(index = 0U; index < FLOPPY144_SITE_RECT_COUNT; ++index)
+    {
+        const Floppy144SiteRect *rect = &floppy144_site_rects[index];
+        int32_t rect_x0;
+        int32_t rect_x1;
+        int32_t rect_y0;
+        int32_t rect_y1;
+
+        if(
+            !Floppy144SiteElementBlocksMovement(
+                (Floppy144SiteElement)rect->type
+            )
+        )
+        {
+            continue;
+        }
+
+        /*
+         * Progression-controlled fixtures may exist in compiled Site geometry
+         * before they are reconstructed into the current run. Their geometry
+         * must not become an invisible collision obstacle.
+         */
+        if(filter != NULL && !filter(rect, context))
+        {
+            continue;
+        }
+
+        rect_x0 = (int32_t)rect->x * FLOPPY144_SITE_FIXED_ONE;
+        rect_x1 =
+            ((int32_t)rect->x + (int32_t)rect->width) *
+            FLOPPY144_SITE_FIXED_ONE;
+
+        rect_y0 = (int32_t)rect->y * FLOPPY144_SITE_FIXED_ONE;
+        rect_y1 =
+            ((int32_t)rect->y + (int32_t)rect->height) *
+            FLOPPY144_SITE_FIXED_ONE;
+
+        if(
+            player_x1 > rect_x0 &&
+            player_x0 < rect_x1 &&
+            player_y1 > rect_y0 &&
+            player_y0 < rect_y1
+        )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Floppy144SitePositionBlocked(
+    int32_t centre_x16,
+    int32_t centre_y16
+)
+{
+    return Floppy144SitePositionBlockedFiltered(
+        centre_x16,
+        centre_y16,
+        NULL,
+        NULL
+    );
+}
+
+void Floppy144SiteSpawnPosition(
+    int32_t *x16,
+    int32_t *y16
+)
+{
+    if(x16 != NULL)
+    {
+        *x16 = floppy144_site_spawn_x16;
+    }
+
+    if(y16 != NULL)
+    {
+        *y16 = floppy144_site_spawn_y16;
+    }
+}
+
+/*
+ * Determine whether an attempted movement crosses the outer Site boundary
+ * through an authored exterior door.
+ *
+ * The player position is the same foot-point used by collision. Reusing the
+ * exact movement footprint here means the exit transition occurs at the same
+ * physical threshold at which ordinary Site collision would otherwise stop
+ * the player.
+ */
+static bool Floppy144SiteIntervalsOverlap(
+    int32_t a0,
+    int32_t a1,
+    int32_t b0,
+    int32_t b1
+)
+{
+    return a1 > b0 && a0 < b1;
+}
+
+const Floppy144SiteRect *Floppy144SiteExteriorDoorForMove(
+    int32_t x16,
+    int32_t y16,
+    int32_t delta_x16,
+    int32_t delta_y16
+)
+{
+    const int32_t half_player_width =
+        FLOPPY144_SITE_PLAYER_COLLISION_WIDTH_X16 / 2;
+
+    const int32_t next_x16 = x16 + delta_x16;
+    const int32_t next_y16 = y16 + delta_y16;
+
+    const int32_t player_x0 = next_x16 - half_player_width;
+    const int32_t player_x1 = next_x16 + half_player_width;
+    const int32_t player_y0 =
+        next_y16 - FLOPPY144_SITE_PLAYER_COLLISION_DEPTH_X16;
+    const int32_t player_y1 = next_y16;
+
+    uint32_t uRectIndex;
+
+    if(delta_x16 == 0 && delta_y16 == 0)
+    {
+        return NULL;
+    }
+
+    for(
+        uRectIndex = 0U;
+        uRectIndex < FLOPPY144_SITE_RECT_COUNT;
+        ++uRectIndex
+    )
+    {
+        const Floppy144SiteRect *pRect =
+            &floppy144_site_rects[uRectIndex];
+
+        int32_t door_x0;
+        int32_t door_x1;
+        int32_t door_y0;
+        int32_t door_y1;
+
+        bool bCrossesBoundary = false;
+
+        if(
+            pRect->type != (uint8_t)FLOPPY144_SITE_DOOR ||
+            (
+                pRect->from_room != FLOPPY144_SITE_ROOM_OUTSIDE &&
+                pRect->to_room != FLOPPY144_SITE_ROOM_OUTSIDE
+            )
+        )
+        {
+            continue;
+        }
+
+        door_x0 = (int32_t)pRect->x * FLOPPY144_SITE_FIXED_ONE;
+        door_x1 =
+            ((int32_t)pRect->x + (int32_t)pRect->width) *
+            FLOPPY144_SITE_FIXED_ONE;
+        door_y0 = (int32_t)pRect->y * FLOPPY144_SITE_FIXED_ONE;
+        door_y1 =
+            ((int32_t)pRect->y + (int32_t)pRect->height) *
+            FLOPPY144_SITE_FIXED_ONE;
+
+        /* Left/west exterior boundary. */
+        if(
+            pRect->x == 0U &&
+            delta_x16 < 0 &&
+            player_x0 <= FLOPPY144_SITE_MIN_X16 &&
+            Floppy144SiteIntervalsOverlap(
+                player_y0,
+                player_y1,
+                door_y0,
+                door_y1
+            )
+        )
+        {
+            bCrossesBoundary = true;
+        }
+
+        /* Right/east exterior boundary. */
+        if(
+            (uint16_t)pRect->x + (uint16_t)pRect->width ==
+                (uint16_t)FLOPPY144_SITE_SIZE_UNITS &&
+            delta_x16 > 0 &&
+            player_x1 >= FLOPPY144_SITE_MAX_X16 &&
+            Floppy144SiteIntervalsOverlap(
+                player_y0,
+                player_y1,
+                door_y0,
+                door_y1
+            )
+        )
+        {
+            bCrossesBoundary = true;
+        }
+
+        /* Top/north exterior boundary. */
+        if(
+            pRect->y == 0U &&
+            delta_y16 < 0 &&
+            player_y0 <= FLOPPY144_SITE_MIN_Y16 &&
+            Floppy144SiteIntervalsOverlap(
+                player_x0,
+                player_x1,
+                door_x0,
+                door_x1
+            )
+        )
+        {
+            bCrossesBoundary = true;
+        }
+
+        /* Bottom/south exterior boundary. */
+        if(
+            (uint16_t)pRect->y + (uint16_t)pRect->height ==
+                (uint16_t)FLOPPY144_SITE_SIZE_UNITS &&
+            delta_y16 > 0 &&
+            player_y1 >= FLOPPY144_SITE_MAX_Y16 &&
+            Floppy144SiteIntervalsOverlap(
+                player_x0,
+                player_x1,
+                door_x0,
+                door_x1
+            )
+        )
+        {
+            bCrossesBoundary = true;
+        }
+
+        if(bCrossesBoundary)
+        {
+            return pRect;
+        }
+    }
+
+    return NULL;
+}
+
+bool Floppy144SiteMovePositionFiltered(
+    int32_t *x16,
+    int32_t *y16,
+    int32_t delta_x16,
+    int32_t delta_y16,
+    Floppy144SiteCollisionFilter filter,
+    void *context
+)
+{
+    int32_t next;
+    bool moved = false;
+
+    if(x16 == NULL || y16 == NULL)
+    {
+        return false;
+    }
+
+    next = *x16 + delta_x16;
+
+    if(
+        !Floppy144SitePositionBlockedFiltered(
+            next,
+            *y16,
+            filter,
+            context
+        )
+    )
+    {
+        if(next != *x16)
+        {
+            *x16 = next;
+            moved = true;
+        }
+    }
+
+    next = *y16 + delta_y16;
+
+    if(
+        !Floppy144SitePositionBlockedFiltered(
+            *x16,
+            next,
+            filter,
+            context
+        )
+    )
+    {
+        if(next != *y16)
+        {
+            *y16 = next;
+            moved = true;
+        }
+    }
+
+    return moved;
+}
+
+bool Floppy144SiteMovePosition(
+    int32_t *x16,
+    int32_t *y16,
+    int32_t delta_x16,
+    int32_t delta_y16
+)
+{
+    return Floppy144SiteMovePositionFiltered(
+        x16,
+        y16,
+        delta_x16,
+        delta_y16,
+        NULL,
+        NULL
+    );
+}

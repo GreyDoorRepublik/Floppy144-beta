@@ -1,0 +1,56 @@
+param(
+    # The runtime-authoritative layout is emitted from canonical game data.
+    # The root site_layout.jsonc is retained as the pre-transform design source
+    # and must be passed explicitly if it is ever being validated in isolation.
+    [string]$InputFile = "game\src\site_layout.generated.jsonc",
+    [string]$OutputFile = "game\src\floppy144_site_generated.def"
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$root = Split-Path -Parent $PSScriptRoot
+$compilerSource = Join-Path $PSScriptRoot "site_compiler.c"
+$toolObjDir = Join-Path $root "obj\tools"
+$compilerExe = Join-Path $toolObjDir "site_compiler.exe"
+$compilerObj = Join-Path $toolObjDir "site_compiler.obj"
+$inputPath = Join-Path $root $InputFile
+$outputPath = Join-Path $root $OutputFile
+
+New-Item -ItemType Directory -Force $toolObjDir | Out-Null
+
+Push-Location $root
+try {
+    if(-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+        throw "cl.exe was not found. Run this from a Visual Studio Developer PowerShell/Command Prompt."
+    }
+
+    Write-Host "`n=== BUILD SITE COMPILER ==="
+
+    & cl.exe `
+        /nologo `
+        /TC `
+        /std:c11 `
+        /utf-8 `
+        /W4 `
+        /WX `
+        /O2 `
+        "/Fo:$compilerObj" `
+        "/Fe:$compilerExe" `
+        $compilerSource
+
+    if($LASTEXITCODE -ne 0) {
+        throw "Site compiler build failed with exit code $LASTEXITCODE."
+    }
+
+    Write-Host "`n=== COMPILE SITE DATA ==="
+
+    & $compilerExe $inputPath $outputPath
+
+    if($LASTEXITCODE -ne 0) {
+        throw "Site data compilation failed with exit code $LASTEXITCODE."
+    }
+}
+finally {
+    Pop-Location
+}

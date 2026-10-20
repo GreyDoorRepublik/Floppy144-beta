@@ -1,0 +1,802 @@
+/*
+ * Floppy//144 - software drawing implementation
+ *
+ * A deliberately small renderer for rectangles and bitmap text. Keeping these
+ * primitives local avoids external art assets and supports the floppy-size goal.
+ */
+
+#include "floppy144_draw.h"
+
+#include <stddef.h>
+
+/*
+ * Embedded 5x7 font format
+ *
+ * Seven five-bit rows are packed into one 64-bit integer. A set bit means
+ * that pixel in the glyph should be drawn.
+ */
+
+#define FLOPPY144_GLYPH(row0, row1, row2, row3, row4, row5, row6) \
+    ((uint64_t)(row0)       | \
+    ((uint64_t)(row1) << 5)  | \
+    ((uint64_t)(row2) << 10) | \
+    ((uint64_t)(row3) << 15) | \
+    ((uint64_t)(row4) << 20) | \
+    ((uint64_t)(row5) << 25) | \
+    ((uint64_t)(row6) << 30))
+
+/*
+ * Look up a character glyph
+ *
+ * The switch stores uppercase letters, digits and the punctuation needed
+ * by the interface. Unsupported characters use a question-mark glyph.
+ */
+
+static uint64_t Floppy144Glyph(
+    char character
+)
+{
+    switch(character)
+    {
+        case 'A': return FLOPPY144_GLYPH(14, 17, 17, 31, 17, 17, 17);
+        case 'B': return FLOPPY144_GLYPH(30, 17, 17, 30, 17, 17, 30);
+        case 'C': return FLOPPY144_GLYPH(15, 16, 16, 16, 16, 16, 15);
+        case 'D': return FLOPPY144_GLYPH(30, 17, 17, 17, 17, 17, 30);
+        case 'E': return FLOPPY144_GLYPH(31, 16, 16, 30, 16, 16, 31);
+        case 'F': return FLOPPY144_GLYPH(31, 16, 16, 30, 16, 16, 16);
+        case 'G': return FLOPPY144_GLYPH(15, 16, 16, 23, 17, 17, 15);
+        case 'H': return FLOPPY144_GLYPH(17, 17, 17, 31, 17, 17, 17);
+        case 'I': return FLOPPY144_GLYPH(31, 4, 4, 4, 4, 4, 31);
+        case 'J': return FLOPPY144_GLYPH(7, 2, 2, 2, 18, 18, 12);
+        case 'K': return FLOPPY144_GLYPH(17, 18, 20, 24, 20, 18, 17);
+        case 'L': return FLOPPY144_GLYPH(16, 16, 16, 16, 16, 16, 31);
+        case 'M': return FLOPPY144_GLYPH(17, 27, 21, 21, 17, 17, 17);
+        case 'N': return FLOPPY144_GLYPH(17, 25, 21, 19, 17, 17, 17);
+        case 'O': return FLOPPY144_GLYPH(14, 17, 17, 17, 17, 17, 14);
+        case 'P': return FLOPPY144_GLYPH(30, 17, 17, 30, 16, 16, 16);
+        case 'Q': return FLOPPY144_GLYPH(14, 17, 17, 17, 21, 18, 13);
+        case 'R': return FLOPPY144_GLYPH(30, 17, 17, 30, 20, 18, 17);
+        case 'S': return FLOPPY144_GLYPH(15, 16, 16, 14, 1, 1, 30);
+        case 'T': return FLOPPY144_GLYPH(31, 4, 4, 4, 4, 4, 4);
+        case 'U': return FLOPPY144_GLYPH(17, 17, 17, 17, 17, 17, 14);
+        case 'V': return FLOPPY144_GLYPH(17, 17, 17, 17, 17, 10, 4);
+        case 'W': return FLOPPY144_GLYPH(17, 17, 17, 21, 21, 27, 17);
+        case 'X': return FLOPPY144_GLYPH(17, 17, 10, 4, 10, 17, 17);
+        case 'Y': return FLOPPY144_GLYPH(17, 17, 10, 4, 4, 4, 4);
+        case 'Z': return FLOPPY144_GLYPH(31, 1, 2, 4, 8, 16, 31);
+
+        case '0': return FLOPPY144_GLYPH(14, 17, 19, 21, 25, 17, 14);
+        case '1': return FLOPPY144_GLYPH(4, 12, 4, 4, 4, 4, 14);
+        case '2': return FLOPPY144_GLYPH(14, 17, 1, 2, 4, 8, 31);
+        case '3': return FLOPPY144_GLYPH(30, 1, 1, 14, 1, 1, 30);
+        case '4': return FLOPPY144_GLYPH(2, 6, 10, 18, 31, 2, 2);
+        case '5': return FLOPPY144_GLYPH(31, 16, 16, 30, 1, 1, 30);
+        case '6': return FLOPPY144_GLYPH(14, 16, 16, 30, 17, 17, 14);
+        case '7': return FLOPPY144_GLYPH(31, 1, 2, 4, 8, 8, 8);
+        case '8': return FLOPPY144_GLYPH(14, 17, 17, 14, 17, 17, 14);
+        case '9': return FLOPPY144_GLYPH(14, 17, 17, 15, 1, 1, 14);
+
+        case '-': return FLOPPY144_GLYPH(0, 0, 0, 31, 0, 0, 0);
+        case ':': return FLOPPY144_GLYPH(0, 4, 4, 0, 4, 4, 0);
+        case '.': return FLOPPY144_GLYPH(0, 0, 0, 0, 0, 4, 4);
+        case ',': return FLOPPY144_GLYPH(0, 0, 0, 0, 0, 4, 8);
+        case '/': return FLOPPY144_GLYPH(1, 2, 2, 4, 8, 8, 16);
+        case '\\': return FLOPPY144_GLYPH(16, 8, 8, 4, 2, 2, 1);
+        case '_': return FLOPPY144_GLYPH(0, 0, 0, 0, 0, 0, 31);
+        case '%': return FLOPPY144_GLYPH(17, 2, 4, 8, 16, 17, 0);
+        case '>': return FLOPPY144_GLYPH(16, 8, 4, 2, 4, 8, 16);
+        case '<': return FLOPPY144_GLYPH(2, 4, 8, 16, 8, 4, 2);
+        case '[': return FLOPPY144_GLYPH(14, 8, 8, 8, 8, 8, 14);
+        case ']': return FLOPPY144_GLYPH(14, 2, 2, 2, 2, 2, 14);
+        case '@': return FLOPPY144_GLYPH(14, 17, 21, 29, 5, 1, 30);
+        case '&': return FLOPPY144_GLYPH(12, 18, 12, 21, 18, 18, 13);
+        case '!': return FLOPPY144_GLYPH(4, 4, 4, 4, 4, 0, 4);
+        case '"': return FLOPPY144_GLYPH(10, 10, 10, 0, 0, 0, 0);
+        case '#': return FLOPPY144_GLYPH(10, 31, 10, 10, 31, 10, 0);
+        case '\'': return FLOPPY144_GLYPH(4, 4, 2, 0, 0, 0, 0);
+        case '(': return FLOPPY144_GLYPH(2, 4, 8, 8, 8, 4, 2);
+        case ')': return FLOPPY144_GLYPH(8, 4, 2, 2, 2, 4, 8);
+        /* Notebook uses '*' as a compact bullet rather than an asterisk. */
+        case '*': return FLOPPY144_GLYPH(0, 0, 4, 14, 4, 0, 0);
+        case '+': return FLOPPY144_GLYPH(0, 4, 4, 31, 4, 4, 0);
+        case ';': return FLOPPY144_GLYPH(0, 4, 4, 0, 4, 4, 8);
+        case '=': return FLOPPY144_GLYPH(0, 0, 31, 0, 31, 0, 0);
+        case '?': return FLOPPY144_GLYPH(14, 17, 2, 4, 0, 4, 0);
+        case '|': return FLOPPY144_GLYPH(4, 4, 4, 4, 4, 4, 4);
+        case ' ': return 0;
+
+        default: return FLOPPY144_GLYPH(14, 17, 2, 4, 0, 4, 0);
+    }
+}
+
+/*
+ * Clear the entire backbuffer
+ *
+ * Uses a 64-bit count so width multiplied by height cannot overflow a
+ * 32-bit intermediate value on larger surfaces.
+ */
+
+void Floppy144DrawClear(
+    Floppy144Surface *surface,
+    uint32_t colour
+)
+{
+    uint64_t pixel_count;
+    uint64_t pixel_index;
+
+    pixel_count =
+        (uint64_t)surface->width *
+        (uint64_t)surface->height;
+
+    for(pixel_index = 0; pixel_index < pixel_count; ++pixel_index)
+    {
+        surface->pixels[pixel_index] = colour;
+    }
+}
+
+/*
+ * Draw a clipped solid rectangle
+ *
+ * Rejects empty or off-screen rectangles, clips the far edges to the
+ * surface, then writes each covered pixel.
+ */
+
+void Floppy144DrawFillRect(
+    Floppy144Surface *surface,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    uint32_t colour
+)
+{
+    uint32_t end_x;
+    uint32_t end_y;
+    uint32_t draw_x;
+    uint32_t draw_y;
+
+    if(
+        width == 0 ||
+        height == 0 ||
+        x >= surface->width ||
+        y >= surface->height
+    )
+    {
+        return;
+    }
+
+    end_x = x + width;
+    end_y = y + height;
+
+    if(end_x > surface->width)
+    {
+        end_x = surface->width;
+    }
+
+    if(end_y > surface->height)
+    {
+        end_y = surface->height;
+    }
+
+    for(draw_y = y; draw_y < end_y; ++draw_y)
+    {
+        for(draw_x = x; draw_x < end_x; ++draw_x)
+        {
+            surface->pixels[
+                (uint64_t)draw_y * surface->width + draw_x
+            ] = colour;
+        }
+    }
+}
+
+/*
+ * Draw a one-pixel rectangle outline
+ *
+ * Reuses FillRect for the top, bottom, left and right edges.
+ */
+
+void Floppy144DrawRect(
+    Floppy144Surface *surface,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height,
+    uint32_t colour
+)
+{
+    if(width == 0 || height == 0)
+    {
+        return;
+    }
+
+    Floppy144DrawFillRect(
+        surface,
+        x,
+        y,
+        width,
+        1,
+        colour
+    );
+
+    Floppy144DrawFillRect(
+        surface,
+        x,
+        y + height - 1,
+        width,
+        1,
+        colour
+    );
+
+    Floppy144DrawFillRect(
+        surface,
+        x,
+        y,
+        1,
+        height,
+        colour
+    );
+
+    Floppy144DrawFillRect(
+        surface,
+        x + width - 1,
+        y,
+        1,
+        height,
+        colour
+    );
+}
+
+/*
+ * Draw the common scroll indicator.
+ *
+ * The six-pixel track, one-pixel outline and two-pixel inset thumb are shared
+ * by Catalogue, Notebook, documents, Completion and Inspection. The helper
+ * receives logical item/line counts so individual screens keep ownership of
+ * their navigation state while presenting the same visual affordance.
+ */
+void Floppy144DrawScrollbar(
+    Floppy144Surface *surface,
+    uint32_t x,
+    uint32_t y,
+    uint32_t height,
+    uint32_t total_items,
+    uint32_t visible_items,
+    uint32_t top_item,
+    uint32_t track_colour,
+    uint32_t border_colour,
+    uint32_t thumb_colour
+)
+{
+    uint32_t maximum_top;
+    uint32_t thumb_height;
+    uint32_t travel;
+    uint32_t thumb_y;
+
+    if(
+        surface == NULL ||
+        surface->pixels == NULL ||
+        height == 0U ||
+        visible_items == 0U ||
+        total_items <= visible_items
+    )
+    {
+        return;
+    }
+
+    maximum_top=total_items-visible_items;
+
+    if(top_item>maximum_top)
+    {
+        top_item=maximum_top;
+    }
+
+    thumb_height=
+        (height*visible_items)/total_items;
+
+    if(thumb_height<18U)
+    {
+        thumb_height=18U;
+    }
+
+    if(thumb_height>height)
+    {
+        thumb_height=height;
+    }
+
+    travel=height-thumb_height;
+    thumb_y=y+(travel*top_item)/maximum_top;
+
+    Floppy144DrawFillRect(
+        surface,
+        x,
+        y,
+        6U,
+        height,
+        track_colour
+    );
+
+    Floppy144DrawRect(
+        surface,
+        x,
+        y,
+        6U,
+        height,
+        border_colour
+    );
+
+    Floppy144DrawFillRect(
+        surface,
+        x+2U,
+        thumb_y+1U,
+        2U,
+        thumb_height>2U?thumb_height-2U:thumb_height,
+        thumb_colour
+    );
+}
+/*
+ * Circle primitives
+ *
+ * Circle draws a one-pixel outline. FillCircle draws a solid disc.
+ * Signed coordinates allow circles to extend beyond the screen edges.
+ */
+
+void Floppy144DrawCircle(
+    Floppy144Surface *surface,
+    int32_t centre_x,
+    int32_t centre_y,
+    int32_t radius,
+    uint32_t colour
+);
+
+void Floppy144DrawFillCircle(
+    Floppy144Surface *surface,
+    int32_t centre_x,
+    int32_t centre_y,
+    int32_t radius,
+    uint32_t colour
+);
+/*
+ * Draw one clipped pixel
+ *
+ * Circle coordinates are signed because part of a circle may lie beyond
+ * the surface. Pixels outside the backbuffer are simply ignored.
+ */
+
+static void Floppy144DrawPixel(
+    Floppy144Surface *surface,
+    int32_t x,
+    int32_t y,
+    uint32_t colour
+)
+{
+    if(
+        x < 0 ||
+        y < 0 ||
+        (uint32_t)x >= surface->width ||
+        (uint32_t)y >= surface->height
+    )
+    {
+        return;
+    }
+
+    surface->pixels[
+        (uint64_t)(uint32_t)y * surface->width +
+        (uint32_t)x
+    ] = colour;
+}
+
+/*
+ * Draw a clipped horizontal line
+ *
+ * Filled circles are assembled from horizontal spans. Drawing spans rather
+ * than individual interior pixels keeps the algorithm compact and clear.
+ */
+
+static void Floppy144DrawHorizontalSpan(
+    Floppy144Surface *surface,
+    int32_t start_x,
+    int32_t end_x,
+    int32_t y,
+    uint32_t colour
+)
+{
+    int32_t draw_x;
+
+    if(
+        y < 0 ||
+        (uint32_t)y >= surface->height ||
+        end_x < 0 ||
+        start_x >= (int32_t)surface->width
+    )
+    {
+        return;
+    }
+
+    if(start_x < 0)
+    {
+        start_x = 0;
+    }
+
+    if((uint32_t)end_x >= surface->width)
+    {
+        end_x =
+        (int32_t)surface->width - 1;
+    }
+
+    for(draw_x = start_x; draw_x <= end_x; ++draw_x)
+    {
+        surface->pixels[
+            (uint64_t)(uint32_t)y * surface->width +
+            (uint32_t)draw_x
+        ] = colour;
+    }
+}
+
+/*
+ * Draw a one-pixel circle outline
+ *
+ * The midpoint-circle algorithm calculates one eighth of the circle and
+ * mirrors each point into the other seven sections.
+ */
+
+void Floppy144DrawCircle(
+    Floppy144Surface *surface,
+    int32_t centre_x,
+    int32_t centre_y,
+    int32_t radius,
+    uint32_t colour
+)
+{
+    int32_t x;
+    int32_t y;
+    int32_t error;
+
+    if(radius < 0)
+    {
+        return;
+    }
+
+    x = radius;
+    y = 0;
+    error = 1 - radius;
+
+    while(x >= y)
+    {
+        Floppy144DrawPixel(
+            surface,
+            centre_x + x,
+            centre_y + y,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x + y,
+            centre_y + x,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x - y,
+            centre_y + x,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x - x,
+            centre_y + y,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x - x,
+            centre_y - y,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x - y,
+            centre_y - x,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x + y,
+            centre_y - x,
+            colour
+        );
+
+        Floppy144DrawPixel(
+            surface,
+            centre_x + x,
+            centre_y - y,
+            colour
+        );
+
+        ++y;
+
+        if(error < 0)
+        {
+            error +=
+            2 * y + 1;
+        }
+        else
+        {
+            --x;
+
+            error +=
+            2 * (y - x) + 1;
+        }
+    }
+}
+
+/*
+ * Draw a solid circle
+ *
+ * The same midpoint calculation is used, but each symmetrical pair becomes
+ * a horizontal span. Overlapping spans are harmless and leave no gaps.
+ */
+
+void Floppy144DrawFillCircle(
+    Floppy144Surface *surface,
+    int32_t centre_x,
+    int32_t centre_y,
+    int32_t radius,
+    uint32_t colour
+)
+{
+    int32_t x;
+    int32_t y;
+    int32_t error;
+
+    if(radius < 0)
+    {
+        return;
+    }
+
+    x = radius;
+    y = 0;
+    error = 1 - radius;
+
+    while(x >= y)
+    {
+        Floppy144DrawHorizontalSpan(
+            surface,
+            centre_x - x,
+            centre_x + x,
+            centre_y + y,
+            colour
+        );
+
+        Floppy144DrawHorizontalSpan(
+            surface,
+            centre_x - x,
+            centre_x + x,
+            centre_y - y,
+            colour
+        );
+
+        Floppy144DrawHorizontalSpan(
+            surface,
+            centre_x - y,
+            centre_x + y,
+            centre_y + x,
+            colour
+        );
+
+        Floppy144DrawHorizontalSpan(
+            surface,
+            centre_x - y,
+            centre_x + y,
+            centre_y - x,
+            colour
+        );
+
+        ++y;
+
+        if(error < 0)
+        {
+            error +=
+            2 * y + 1;
+        }
+        else
+        {
+            --x;
+
+            error +=
+            2 * (y - x) + 1;
+        }
+    }
+}
+/*
+ * Decode the small set of UTF-8 punctuation used by authored archive prose.
+ *
+ * The renderer remains an ASCII 5x7 font, but smart quotes/dashes and a
+ * Unicode bullet are normalised to supported glyphs instead of becoming
+ * three separate question marks. Other bytes fall back through the normal
+ * unsupported-character glyph path.
+ */
+static uint32_t Floppy144DisplayCharacter(
+    const char *pszText,
+    char *pCharacter
+)
+{
+    const unsigned char *pBytes =
+        (const unsigned char *)pszText;
+
+    if(pszText == NULL || pCharacter == NULL || pBytes[0] == 0U)
+    {
+        return 0U;
+    }
+
+    if(
+        pBytes[0] == 0xE2U &&
+        pBytes[1] == 0x80U &&
+        pBytes[2] != 0U
+    )
+    {
+        switch(pBytes[2])
+        {
+            case 0x98U:
+            case 0x99U:
+                *pCharacter = '\'';
+                return 3U;
+
+            case 0x9CU:
+            case 0x9DU:
+                *pCharacter = '"';
+                return 3U;
+
+            case 0x93U:
+            case 0x94U:
+                *pCharacter = '-';
+                return 3U;
+
+            case 0xA2U:
+                *pCharacter = '*';
+                return 3U;
+
+            case 0xA6U:
+                *pCharacter = '.';
+                return 3U;
+
+            default:
+                break;
+        }
+    }
+
+    *pCharacter = (char)pBytes[0];
+    return 1U;
+}
+
+/*
+ * Measure bitmap text
+ *
+ * Each glyph is five pixels wide with one pixel of spacing. The final
+ * character does not need trailing spacing.
+ */
+uint32_t Floppy144DrawTextWidth(
+    const char *text,
+    uint32_t scale
+)
+{
+    uint32_t uByteIndex = 0U;
+    uint32_t uCharacterCount = 0U;
+
+    if(text == NULL)
+    {
+        return 0U;
+    }
+
+    while(text[uByteIndex] != '\0')
+    {
+        char chDisplay;
+        uint32_t uConsumed =
+            Floppy144DisplayCharacter(
+                &text[uByteIndex],
+                &chDisplay
+            );
+
+        if(uConsumed == 0U)
+        {
+            break;
+        }
+
+        uByteIndex += uConsumed;
+        ++uCharacterCount;
+        (void)chDisplay;
+    }
+
+    if(uCharacterCount == 0U)
+    {
+        return 0U;
+    }
+
+    return uCharacterCount * 6U * scale - scale;
+}
+
+/*
+ * Render bitmap text
+ *
+ * Lowercase input is converted to uppercase. Each set glyph bit becomes a
+ * scale-by-scale rectangle, allowing crisp integer-sized text.
+ */
+
+void Floppy144DrawText(
+    Floppy144Surface *surface,
+    uint32_t x,
+    uint32_t y,
+    const char *text,
+    uint32_t scale,
+    uint32_t colour
+)
+{
+    uint32_t uByteIndex = 0U;
+
+    if(text == NULL)
+    {
+        return;
+    }
+
+    while(text[uByteIndex] != '\0')
+    {
+        char character;
+        uint32_t uConsumed =
+            Floppy144DisplayCharacter(
+                &text[uByteIndex],
+                &character
+            );
+        uint64_t glyph;
+        uint32_t glyph_row;
+        uint32_t glyph_column;
+
+        if(uConsumed == 0U)
+        {
+            break;
+        }
+
+        /* The font table is uppercase-only, so normalise lowercase input. */
+        if(character >= 'a' && character <= 'z')
+        {
+            character =
+                (char)(character - ('a' - 'A'));
+        }
+
+        glyph = Floppy144Glyph(character);
+
+        /* Unpack the seven rows, then test each of the five bits in a row. */
+        for(glyph_row = 0; glyph_row < 7; ++glyph_row)
+        {
+            uint32_t row_bits =
+                (uint32_t)((glyph >> (glyph_row * 5)) & 31);
+
+            for(glyph_column = 0;
+                glyph_column < 5;
+                ++glyph_column)
+            {
+                uint32_t mask =
+                    1U << (4U - glyph_column);
+
+                if((row_bits & mask) != 0)
+                {
+                    Floppy144DrawFillRect(
+                        surface,
+                        x + glyph_column * scale,
+                        y + glyph_row * scale,
+                        scale,
+                        scale,
+                        colour
+                    );
+                }
+            }
+        }
+
+        x += 6 * scale;
+        uByteIndex += uConsumed;
+    }
+}

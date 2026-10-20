@@ -1,0 +1,941 @@
+/*
+ * Floppy//144 - recovery screen implementation
+ *
+ * Builds the boot-like recovery interface entirely from drawing primitives.
+ * This screen introduces Disk 144, APS-12 and the partial reconstruction.
+ */
+
+#include "floppy144_recovery.h"
+
+#include "floppy144_draw.h"
+
+#include <stdio.h>
+#include <string.h>
+
+/*
+ * Centred-text helper
+ *
+ * Measures a string and converts its width into a horizontal start point.
+ */
+
+static void Floppy144RecoveryTextCentred(
+    Floppy144Surface *surface,
+    uint32_t y,
+    const char *text,
+    uint32_t scale,
+    uint32_t colour
+)
+{
+    uint32_t text_width =
+        Floppy144DrawTextWidth(text, scale);
+
+    uint32_t x =
+        (surface->width - text_width) / 2;
+
+    Floppy144DrawText(
+        surface,
+        x,
+        y,
+        text,
+        scale,
+        colour
+    );
+}
+
+static const char *const floppy144_main_menu_labels[] =
+{
+    "INITIATE NEW RECOVERY SESSION",
+    "RETURN TO ACTIVE SITE",
+    "OPERATOR PROFILE",
+    "SETTINGS",
+    "TERMINATE RECOVERY ENVIRONMENT"
+};
+
+static const char *const floppy144_save_load_labels[2]={
+    "RECORD CURRENT SESSION",
+    "REINSTATE RECORDED SESSION"
+};
+
+/*
+ * Report whether one session-control option is available.
+ */
+
+void Floppy144RecoveryFormatCapacity(
+    const Floppy144RunState *pState,
+    char *pszBuffer,
+    uint32_t uBufferCapacity
+)
+{
+    Floppy144RunStateFormatCapacity(
+        pState,
+        pszBuffer,
+        uBufferCapacity
+    );
+}
+
+bool Floppy144MainMenuOptionEnabled(
+    Floppy144MainMenuOption option,
+    bool active_session,
+    bool recorded_session_available
+)
+{
+    switch(option)
+    {
+        case FLOPPY144_MAIN_MENU_INITIATE_SESSION:
+        case FLOPPY144_MAIN_MENU_OPERATOR_PROFILE:
+        case FLOPPY144_MAIN_MENU_SETTINGS:
+        case FLOPPY144_MAIN_MENU_TERMINATE:
+        {
+            return true;
+        }
+
+        case FLOPPY144_MAIN_MENU_RETURN_TO_SITE:
+        case FLOPPY144_MAIN_MENU_RECORD_SESSION:
+        {
+            return active_session;
+        }
+
+        case FLOPPY144_MAIN_MENU_REINSTATE_SESSION:
+        {
+            return recorded_session_available;
+        }
+
+        case FLOPPY144_MAIN_MENU_OPTION_COUNT:
+        {
+            return false;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * BF28: a five-row menu with a small horizontal two-row carousel.
+ * The flags and animation progress live only in coordinator UI state.
+ */
+Floppy144MainMenuOption Floppy144MainMenuVisibleOption(
+    Floppy144MainMenuOption row,bool save_load_visible
+)
+{
+    if(!save_load_visible)return row;
+    if(row==FLOPPY144_MAIN_MENU_OPERATOR_PROFILE)
+        return FLOPPY144_MAIN_MENU_RECORD_SESSION;
+    if(row==FLOPPY144_MAIN_MENU_SETTINGS)
+        return FLOPPY144_MAIN_MENU_REINSTATE_SESSION;
+    return row;
+}
+bool Floppy144MainMenuRowSelectable(
+    Floppy144MainMenuOption row,
+    bool save_load_visible,
+    bool active_session,
+    bool recorded_session_available
+)
+{
+    /* The extra action enum values are not menu rows. */
+    if((int32_t)row < 0 ||
+       row >= FLOPPY144_MAIN_MENU_OPTION_COUNT)
+    {
+        return false;
+    }
+
+    return Floppy144MainMenuOptionEnabled(
+        Floppy144MainMenuVisibleOption(row,save_load_visible),
+        active_session,
+        recorded_session_available
+    );
+}
+
+Floppy144MainMenuOption Floppy144MainMenuSelectRow(
+    Floppy144MainMenuOption selected_row,
+    int32_t direction,
+    bool save_load_visible,
+    bool active_session,
+    bool recorded_session_available
+)
+{
+    int32_t row=(int32_t)selected_row;
+    int32_t step=direction<0?-1:1;
+    uint32_t attempts;
+
+    if(direction==0 &&
+       Floppy144MainMenuRowSelectable(selected_row,save_load_visible,
+           active_session,recorded_session_available))
+    {
+        return selected_row;
+    }
+
+    if(row<0 || row>=(int32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT)
+    {
+        row=step>0?(int32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT-1:0;
+    }
+
+    for(attempts=0U;attempts<(uint32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT;
+        ++attempts)
+    {
+        row=(row+(int32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT+step)%
+            (int32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT;
+        if(Floppy144MainMenuRowSelectable((Floppy144MainMenuOption)row,
+            save_load_visible,active_session,recorded_session_available))
+        {
+            return (Floppy144MainMenuOption)row;
+        }
+    }
+
+    /* Initiate is always available; this is a defensive fallback. */
+    return FLOPPY144_MAIN_MENU_INITIATE_SESSION;
+}
+void Floppy144MainMenuSlideReset(Floppy144MainMenuSlide *slide)
+{
+    if(slide==NULL)return;
+    slide->save_load_visible=false;
+    slide->previous_save_load_visible=false;
+    slide->animating=false;
+    slide->direction=0;
+    slide->elapsed_ms=0U;
+}
+bool Floppy144MainMenuSlideStart(Floppy144MainMenuSlide *slide,
+    int32_t direction)
+{
+    if(slide==NULL||direction==0||slide->animating)return false;
+    slide->previous_save_load_visible=slide->save_load_visible;
+    slide->save_load_visible=!slide->save_load_visible;
+    slide->direction=direction<0?-1:1;
+    slide->elapsed_ms=0U;
+    slide->animating=true;
+    return true;
+}
+bool Floppy144MainMenuSlideAdvance(Floppy144MainMenuSlide *slide,
+    uint32_t elapsed_ms)
+{
+    if(slide==NULL||!slide->animating||elapsed_ms==0U)return false;
+    if(elapsed_ms>=FLOPPY144_MAIN_MENU_SLIDE_MS-slide->elapsed_ms)
+    {
+        slide->elapsed_ms=FLOPPY144_MAIN_MENU_SLIDE_MS;
+        slide->animating=false;
+    }
+    else slide->elapsed_ms+=elapsed_ms;
+    return true;
+}
+static const char *Floppy144MainMenuRowLabel(
+    uint32_t row,bool save_load_visible)
+{
+    if(save_load_visible && (row==2U||row==3U))
+        return floppy144_save_load_labels[row-2U];
+    return floppy144_main_menu_labels[row];
+}
+
+/* Offscreen text is clipped at the framebuffer edge. Draw into a tiny
+ * scratch strip with the *existing* bitmap text primitive, then blit only
+ * coloured glyph pixels with signed offsets. This avoids unsigned-coordinate
+ * overflow for labels travelling left of x=0, and adds no stored sprites. */
+static void Floppy144RecoverySlideText(
+    Floppy144Surface *surface,int32_t offset,uint32_t y,
+    const char *label,uint32_t colour)
+{
+    uint32_t scratch_pixels[640U*8U];
+    Floppy144Surface strip={scratch_pixels,640U,8U};
+    uint32_t x,dy,w=Floppy144DrawTextWidth(label,1U);
+    if(surface==NULL||surface->pixels==NULL||w>640U)return;
+    Floppy144DrawClear(&strip,0U);
+    Floppy144DrawText(&strip,(640U-w)/2U,0U,label,1U,colour);
+    for(dy=0U;dy<7U;++dy)
+        for(x=0U;x<640U;++x)
+        {
+            int32_t destination=(int32_t)x+offset;
+            uint32_t colour_at=scratch_pixels[dy*640U+x];
+            if(colour_at && destination>=0 && y+dy<surface->height &&
+                (uint32_t)destination<surface->width)
+                surface->pixels[(y+dy)*surface->width+
+                    (uint32_t)destination]=colour_at;
+        }
+}
+static uint32_t Floppy144MainMenuSlideDistance(
+    const Floppy144MainMenuSlide *slide)
+{
+    uint32_t t,smoothed;
+    if(slide==NULL||!slide->animating)return 640U;
+    /* Cubic ease-in/out: quick middle travel, no jarring terminal bounce. */
+    t=(slide->elapsed_ms*1000U)/FLOPPY144_MAIN_MENU_SLIDE_MS;
+    smoothed=(t*t*(3000U-2U*t))/1000000U;
+    return (640U*smoothed)/1000U;
+}
+/*
+ * Draw the GDR session-control menu.
+ */
+
+void Floppy144MainMenuDrawSliding(
+    Floppy144Surface *pSurface,
+    Floppy144MainMenuOption selected_option,
+    bool active_session,
+    bool recorded_session_available,
+    const Floppy144RunState *run_state,
+    const Floppy144RunState *recorded_run_state,
+    const char *persistence_warning,
+    const char *menu_notice,
+    bool menu_notice_is_warning,
+    bool reinstate_confirmation,
+    const Floppy144MainMenuSlide *slide,
+    const char *operator_name
+)
+{
+    const uint32_t background =
+        FLOPPY144_RGB(17, 23, 28);
+
+    const uint32_t panel =
+        FLOPPY144_RGB(24, 33, 39);
+
+    const uint32_t panel_dark =
+        FLOPPY144_RGB(12, 17, 21);
+
+    const uint32_t border =
+        FLOPPY144_RGB(86, 103, 107);
+
+    const uint32_t text =
+        FLOPPY144_RGB(202, 211, 205);
+
+    const uint32_t muted =
+        FLOPPY144_RGB(118, 133, 132);
+
+    const uint32_t amber =
+        FLOPPY144_RGB(194, 153, 76);
+
+    const uint32_t green =
+        FLOPPY144_RGB(100, 156, 111);
+
+        const Floppy144RunState *display_state =
+        active_session
+        ? run_state
+        : NULL;
+
+        uint32_t reconstruction_percent =
+        display_state != NULL
+        ? Floppy144RunStateRecoveredPercent(
+            display_state
+        )
+        : 0U;
+
+        uint32_t progress_width =
+        (
+            522U *
+            reconstruction_percent
+        ) /
+        100U;
+
+        char session_status[80];
+        char reconstruction_text[64];
+        const char *account_name =
+            operator_name != NULL && operator_name[0] != '\0'
+                ? operator_name : "GUEST";
+
+    const char *status_text;
+    uint32_t status_colour;
+    uint32_t option_index;
+
+    Floppy144Surface surface;
+
+    if(
+        pSurface == NULL ||
+        pSurface->pixels == NULL
+    )
+    {
+        return;
+    }
+
+    surface = *pSurface;
+
+    if(
+        selected_option < 0 ||
+        selected_option >=
+            FLOPPY144_MAIN_MENU_OPTION_COUNT
+    )
+    {
+        selected_option =
+            FLOPPY144_MAIN_MENU_INITIATE_SESSION;
+    }
+
+    if(active_session)
+    {
+        snprintf(
+            session_status,
+            sizeof(session_status),
+                 "SESSION STATUS: ACTIVE"
+        );
+    }
+    else if(
+        recorded_session_available &&
+        recorded_run_state != NULL
+    )
+    {
+        snprintf(
+            session_status,
+            sizeof(session_status),
+            "RECORDED SESSION: SEED %u",
+            (unsigned)recorded_run_state->recovery_seed
+        );
+    }
+    else
+    {
+        snprintf(
+            session_status,
+            sizeof(session_status),
+                 "SESSION STATUS: NO ACTIVE SESSION"
+        );
+    }
+
+    Floppy144RecoveryFormatCapacity(
+        display_state,
+        reconstruction_text,
+        (uint32_t)sizeof(reconstruction_text)
+    );
+
+    if(menu_notice != NULL)
+    {
+        status_text =
+            menu_notice;
+
+        status_colour =
+            menu_notice_is_warning
+                ? amber
+                : green;
+    }
+    else if(
+        !active_session &&
+        persistence_warning != NULL
+    )
+    {
+        status_text =
+            persistence_warning;
+
+        status_colour =
+            amber;
+    }
+    else
+    {
+        status_text =
+            session_status;
+
+        status_colour =
+            active_session
+                ? green
+                : (
+                    recorded_session_available
+                        ? amber
+                        : muted
+                );
+    }
+
+    Floppy144DrawClear(
+        &surface,
+        background
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        0U,
+        0U,
+        640U,
+        16U,
+        panel_dark
+    );
+
+    Floppy144DrawText(
+        &surface,
+        10U,
+        5U,
+        "GDR SESSION CONTROL SYSTEM",
+        1U,
+        muted
+    );
+
+    Floppy144DrawText(
+        &surface,
+        556U,
+        5U,
+        "APS-12",
+        1U,
+        amber
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        24U,
+        28U,
+        592U,
+        322U,
+        panel
+    );
+
+    Floppy144DrawRect(
+        &surface,
+        24U,
+        28U,
+        592U,
+        322U,
+        border
+    );
+
+    Floppy144RecoveryTextCentred(
+        &surface,
+        40U,
+        "GOVERNMENT DEPARTMENT OF RECORDS",
+        2U,
+        text
+    );
+
+    Floppy144RecoveryTextCentred(
+        &surface,
+        66U,
+        "SITE RECONSTRUCTION ENVIRONMENT",
+        1U,
+        muted
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        48U,
+        88U,
+        544U,
+        1U,
+        border
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        104U,
+        "REMOVABLE MEDIA:",
+        1U,
+        muted
+    );
+
+    Floppy144DrawText(
+        &surface,
+        196U,
+        104U,
+        "DISK 144",
+        1U,
+        text
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        122U,
+        "MEDIA CLASS:",
+        1U,
+        muted
+    );
+
+    Floppy144DrawText(
+        &surface,
+        196U,
+        122U,
+        "RECOVERY",
+        1U,
+        text
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        140U,
+        "PROTOCOL:",
+        1U,
+        muted
+    );
+
+    Floppy144DrawText(
+        &surface,
+        196U,
+        140U,
+        "APS-12 PARTIAL SITE",
+        1U,
+        amber
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        158U,
+        "ACCOUNT:",
+        1U,
+        muted
+    );
+
+    Floppy144DrawText(
+        &surface,
+        196U,
+        158U,
+        account_name,
+        1U,
+        text
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        48U,
+        180U,
+        544U,
+        1U,
+        border
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        280U,
+        status_text,
+        1U,
+        status_colour
+    );
+
+    Floppy144DrawText(
+        &surface,
+        56U,
+        298U,
+        reconstruction_text,
+        1U,
+        text
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        56U,
+        316U,
+        528U,
+        14U,
+        panel_dark
+    );
+
+    Floppy144DrawRect(
+        &surface,
+        56U,
+        316U,
+        528U,
+        14U,
+        border
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        59U,
+        319U,
+        progress_width,
+        8U,
+        green
+    );
+
+    Floppy144DrawFillRect(
+        &surface,
+        48U,
+        266U,
+        544U,
+        1U,
+        border
+    );
+
+    for(
+        option_index = 0U;
+        option_index <
+            (uint32_t)FLOPPY144_MAIN_MENU_OPTION_COUNT;
+        ++option_index
+    )
+    {
+        Floppy144MainMenuOption option =
+            (Floppy144MainMenuOption)option_index;
+
+        bool swapped=slide!=NULL && slide->save_load_visible;
+        const char *label =
+            Floppy144MainMenuRowLabel(option_index,swapped);
+
+        bool enabled =
+            Floppy144MainMenuRowSelectable(
+                option,swapped,
+                active_session,
+                recorded_session_available
+            );
+
+        bool selected =
+            option == selected_option;
+
+        uint32_t row_y =
+            187U +
+            option_index * 17U;
+
+        uint32_t label_width =
+            Floppy144DrawTextWidth(
+                label,
+                1U
+            );
+
+        uint32_t label_x =
+            (
+                surface.width -
+                label_width
+            ) /
+            2U;
+
+        if(selected && enabled)
+        {
+            Floppy144DrawFillRect(
+                &surface,
+                48U,
+                row_y - 4U,
+                544U,
+                14U,
+                panel_dark
+            );
+
+            Floppy144DrawText(
+                &surface,
+                label_x - 14U,
+                row_y,
+                ">",
+                1U,
+                amber
+            );
+        }
+
+        if(slide!=NULL && slide->animating &&
+           (option_index==2U||option_index==3U))
+        {
+            uint32_t distance=Floppy144MainMenuSlideDistance(slide);
+            uint32_t colour=selected?amber:text;
+            int32_t direction=slide->direction;
+            const char *old_label=Floppy144MainMenuRowLabel(option_index,
+                slide->previous_save_load_visible);
+            const char *new_label=Floppy144MainMenuRowLabel(option_index,
+                slide->save_load_visible);
+            Floppy144RecoverySlideText(&surface,direction*(int32_t)distance,
+                row_y,old_label,colour);
+            Floppy144RecoverySlideText(&surface,
+                -direction*(int32_t)(640U-distance),
+                row_y,new_label,enabled?colour:muted);
+        }
+        else
+        {
+            Floppy144DrawText(
+                &surface,
+                label_x,
+                row_y,
+                label,
+                1U,
+                enabled ? (selected ? amber : text) : muted
+            );
+        }
+
+        /* Disabled options remain grey and unselectable; no redundant
+         * text is appended, including while the two rows slide. */
+    }
+
+    Floppy144RecoveryTextCentred(
+        &surface,
+        FLOPPY144_UI_FORMAL_FOOTER_Y - 6U,
+        "UP/DOWN SELECT   LEFT/RIGHT SWITCH   ENTER CONFIRM",
+        1U,
+        muted
+    );
+
+    if(reinstate_confirmation)
+    {
+        char restored_session_text[64];
+
+        /*
+         * Successful reinstate remains a state of Session Control rather than
+         * a separate modal screen. Reuse the menu's inner margins, panel,
+         * dividers and typography so the acknowledgement reads as part of the
+         * same GDR system.
+         *
+         * The normal status/capacity strip is still deliberately hidden until
+         * acknowledgement. The existing input handshake then paints one
+         * ordinary active-session menu frame, including the loaded percentage,
+         * before the matching key-up returns to gameplay.
+         */
+        if(run_state != NULL)
+        {
+            (void)snprintf(
+                restored_session_text,
+                sizeof(restored_session_text),
+                "RECOVERY SEED: %u",
+                (unsigned)run_state->recovery_seed
+            );
+        }
+        else
+        {
+            (void)snprintf(
+                restored_session_text,
+                sizeof(restored_session_text),
+                "%s",
+                "RECOVERY STATE: REINSTATED"
+            );
+        }
+
+        Floppy144DrawFillRect(
+            &surface,
+            48U,
+            164U,
+            544U,
+            154U,
+            panel_dark
+        );
+
+        Floppy144DrawRect(
+            &surface,
+            48U,
+            164U,
+            544U,
+            154U,
+            border
+        );
+
+        Floppy144DrawFillRect(
+            &surface,
+            56U,
+            174U,
+            528U,
+            24U,
+            panel
+        );
+
+        Floppy144DrawRect(
+            &surface,
+            56U,
+            174U,
+            528U,
+            24U,
+            green
+        );
+
+        Floppy144RecoveryTextCentred(
+            &surface,
+            180U,
+            "SESSION RESTORED",
+            2U,
+            green
+        );
+
+        Floppy144RecoveryTextCentred(
+            &surface,
+            214U,
+            "RECORDED RECOVERY STATE REINSTATED",
+            1U,
+            text
+        );
+
+        Floppy144RecoveryTextCentred(
+            &surface,
+            234U,
+            restored_session_text,
+            1U,
+            muted
+        );
+
+        Floppy144DrawFillRect(
+            &surface,
+            56U,
+            254U,
+            528U,
+            1U,
+            border
+        );
+
+        Floppy144RecoveryTextCentred(
+            &surface,
+            270U,
+            "RECOVERY STATUS AVAILABLE AFTER ACKNOWLEDGEMENT",
+            1U,
+            muted
+        );
+
+        Floppy144RecoveryTextCentred(
+            &surface,
+            296U,
+            "PRESS ANY KEY TO CONTINUE",
+            1U,
+            amber
+        );
+    }
+}
+
+/* BF31: full-length choices have their own screen at normal font scale. */
+void Floppy144DifficultyDraw(
+    Floppy144Surface *surface, Floppy144Difficulty selected
+)
+{
+    uint32_t i;
+    const uint32_t background=FLOPPY144_RGB(17,23,28);
+    const uint32_t panel=FLOPPY144_RGB(24,33,39);
+    const uint32_t text=FLOPPY144_RGB(202,211,205);
+    const uint32_t muted=FLOPPY144_RGB(118,133,132);
+    const uint32_t amber=FLOPPY144_RGB(194,153,76);
+    if(surface == NULL || surface->pixels == NULL) return;
+    Floppy144DrawClear(surface,background);
+    Floppy144DrawText(surface,10U,5U,"GDR SESSION CONTROL SYSTEM",1U,muted);
+    Floppy144DrawFillRect(surface,24U,28U,592U,306U,panel);
+    Floppy144DrawRect(surface,24U,28U,592U,306U,muted);
+    Floppy144RecoveryTextCentred(surface,48U,"SELECT RECOVERY DIFFICULTY",2U,text);
+    Floppy144RecoveryTextCentred(surface,79U,
+        "THIS CHOICE WILL BE SAVED WITH YOUR RECOVERY SESSION",1U,muted);
+    for(i=0U;i<(uint32_t)FLOPPY144_DIFFICULTY_COUNT;++i)
+    {
+        const char *name=Floppy144DifficultyName((Floppy144Difficulty)i);
+        const char *subtitle=strchr(name,'(');
+        char first_line[64];
+        uint32_t y=127U+i*41U;
+        uint32_t width,x;
+        bool highlighted=i==(uint32_t)selected;
+
+        /* Wrap only the parenthetical display text. The canonical name
+         * and persisted difficulty value stay unchanged. */
+        if(subtitle!=NULL)
+        {
+            size_t length=(size_t)(subtitle-name);
+            while(length>0U && name[length-1U]==' ')--length;
+            if(length<sizeof(first_line))
+            {
+                memcpy(first_line,name,length);
+                first_line[length]='\0';
+                name=first_line;
+            }
+            else subtitle=NULL;
+        }
+
+        width=Floppy144DrawTextWidth(name,1U);
+        x=(surface->width-width)/2U;
+        if(highlighted)
+        {
+            Floppy144DrawFillRect(surface,42U,y-7U,556U,
+                subtitle!=NULL?40U:23U,background);
+            Floppy144DrawText(surface,49U,y,">",1U,amber);
+        }
+        Floppy144DrawText(surface,x,y,name,1U,highlighted?amber:text);
+        if(subtitle!=NULL)
+        {
+            Floppy144RecoveryTextCentred(surface,y+16U,subtitle,1U,
+                highlighted?amber:text);
+        }
+    }
+    Floppy144RecoveryTextCentred(surface,280U,
+        "UP/DOWN SELECT   ENTER BEGIN   BACKSPACE CANCEL",1U,muted);
+}
+
+/* Preserve the established renderer signature for existing focused tests
+ * and non-animated clients. The game uses DrawSliding for live state. */
+void Floppy144MainMenuDraw(
+    Floppy144Surface *runtime,
+    Floppy144MainMenuOption selected_option,
+    bool active_session,
+    bool recorded_session_available,
+    const Floppy144RunState *run_state,
+    const Floppy144RunState *recorded_run_state,
+    const char *persistence_warning,
+    const char *menu_notice,
+    bool menu_notice_is_warning,
+    bool reinstate_confirmation
+)
+{
+    Floppy144MainMenuDrawSliding(runtime,selected_option,active_session,
+        recorded_session_available,run_state,recorded_run_state,
+        persistence_warning,menu_notice,menu_notice_is_warning,
+        reinstate_confirmation,NULL,NULL);
+}

@@ -1,0 +1,5 @@
+#include "floppy144_trigger_engine.h"
+#include <stddef.h>
+const Floppy144TriggerDefinition *Floppy144TriggerGet(Floppy144TriggerId eTrigger){static Floppy144TriggerDefinition sDefinition;uint32_t uIndex;int32_t nOrdinal=0;if((uint32_t)eTrigger>=(uint32_t)FLOPPY144_TRIGGER_COUNT)return NULL;for(uIndex=0;uIndex<Floppy144GameDataRecordCount();++uIndex){const Floppy144DataRecord*pRecord=Floppy144GameDataRecordAt(uIndex);if(!pRecord||pRecord->eKind!=FLOPPY144_DATA_TRIGGER)continue;if(nOrdinal==(int32_t)eTrigger){sDefinition.pszStableId=pRecord->pszId;sDefinition.uConditionCount=(uint32_t)pRecord->n0;sDefinition.uEffectCount=(uint32_t)pRecord->n1;return&sDefinition;}++nOrdinal;}return NULL;}
+bool Floppy144TriggerCanFire(const Floppy144RunState*pState,Floppy144TriggerId eTrigger){return Floppy144GameDataTriggerCanFire(pState,eTrigger);}
+bool Floppy144TriggerTryFire(Floppy144WorldState*pWorld,Floppy144RunState*pState,Floppy144TriggerId eTrigger){return Floppy144GameDataTriggerTryFire(pWorld,pState,eTrigger);}

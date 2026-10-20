@@ -1,0 +1,293 @@
+/*
+ * Floppy//144 - archive terminal interface
+ *
+ * Owns terminal navigation and collection-detail UI state. Permanent facts
+ * such as restored collections are written to Floppy144WorldState.
+ */
+
+#pragma once
+
+#include "floppy144_draw.h"
+
+#include "floppy144_collection.h"
+#include "floppy144_world.h"
+
+#include "floppy144_run_state.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#define FLOPPY144_TERMINAL_INPUT_CAPACITY 81U
+#define FLOPPY144_TERMINAL_OUTPUT_LINES 12U
+#define FLOPPY144_TERMINAL_OUTPUT_LINE_CAPACITY 96U
+#define FLOPPY144_TERMINAL_HISTORY_ENTRIES 16U
+
+/*
+ * Terminal-local state
+ *
+ * selected_domain tracks the visible archive domain. selected_collection
+ * tracks the highlighted row within that domain. detail_open controls the
+ * collection overlay. restoration_notice is a temporary success message.
+ */
+
+typedef struct Floppy144TerminalState
+{
+    Floppy144CollectionDomain selected_domain;
+    Floppy144CollectionId selected_collection;
+
+    bool detail_open;
+    bool restoration_notice;
+    bool suppress_next_character;
+    bool exit_requested;
+    bool open_record_requested;
+    bool record_pager_active;
+    bool help_pager_active;
+    bool cursor_visible;
+
+    /*
+     * Session guidance is configured by the application after reset.
+     *
+     * Headless terminal tests retain the historical guided/unrestricted
+     * defaults unless they explicitly opt into player-facing behaviour.
+     */
+    bool debug_guidance;
+    uint32_t recovery_seed; /* transient LIST seed */
+    bool first_profile_recovery;
+    bool restoration_location_restrictions;
+    bool terminal_room_valid;
+    Floppy144RoomId terminal_room;
+
+    /*
+     * Collection restoration is deliberately terminal-local until its progress
+     * bar reaches 100%. Duration is derived from the collection's size_kb so a
+     * larger archive visibly takes longer to reconstruct.
+     */
+    bool restoration_in_progress;
+    Floppy144CollectionId restoration_collection;
+    uint32_t restoration_elapsed_ms;
+    uint32_t restoration_duration_ms;
+    uint32_t restoration_tick_percent; /* transient presentation checkpoint */
+
+    /*
+     * Terminal capability and contextual-record state.
+     *
+     * open_command_available prevents OPEN being advertised before the
+     * initial recovery collection has been restored. The default-record
+     * collection is deliberately terminal-session-local: restoring a
+     * collection makes RS-#### shorthand resolve against that collection,
+     * but leaving the terminal clears that convenience context.
+     */
+    bool open_command_available;
+    bool default_record_collection_valid;
+
+    Floppy144CollectionId requested_collection;
+    Floppy144CollectionId default_record_collection;
+
+    Floppy144CollectionId record_pager_collection;
+    uint32_t record_pager_page;
+
+    /* LIST with no code reuses the pager shell with COLLECTION_COUNT sentinel. */
+    const Floppy144RunState *collection_pager_state;
+    uint32_t help_pager_page;
+    uint32_t requested_record_index;
+
+    char input[FLOPPY144_TERMINAL_INPUT_CAPACITY];
+    uint32_t input_length;
+
+    /*
+     * Session-local command history. This state belongs to the terminal UI
+     * only and is never written to RunState or persistence. history_cursor is
+     * -1 while editing the live command line; history_draft preserves any
+     * unfinished text while the operator browses older commands.
+     */
+    char history
+        [FLOPPY144_TERMINAL_HISTORY_ENTRIES]
+        [FLOPPY144_TERMINAL_INPUT_CAPACITY];
+    uint32_t history_count;
+    int32_t history_cursor;
+    char history_draft[FLOPPY144_TERMINAL_INPUT_CAPACITY];
+
+    char output
+        [FLOPPY144_TERMINAL_OUTPUT_LINES]
+        [FLOPPY144_TERMINAL_OUTPUT_LINE_CAPACITY];
+
+    uint32_t output_count;
+} Floppy144TerminalState;
+
+/*
+ * Terminal operations
+ *
+ * These functions reset and navigate the terminal, restore the selected
+ * collection, close details, query UI state and draw the complete screen.
+ */
+
+void Floppy144TerminalReset(
+    Floppy144TerminalState *terminal,
+    const Floppy144WorldState *world
+);
+
+/*
+ * Reset a terminal entered from the physical Site and identify its room in
+ * the first transcript line. The fixed screen header is unchanged.
+ */
+void Floppy144TerminalResetAtRoom(
+    Floppy144TerminalState *terminal,
+    const Floppy144WorldState *world,
+    Floppy144RoomId room
+);
+
+/*
+ * Refresh the player-facing physical terminal identity from persistent
+ * capabilities. The Project Manager's authorisation upgrades Main Office to
+ * the combined MAIN OFFICE / FACILITIES bootstrap terminal.
+ */
+void Floppy144TerminalRefreshEnvironmentLine(
+    Floppy144TerminalState *terminal,
+    const Floppy144RunState *run_state
+);
+
+/*
+ * Apply player-session policy after Reset/ResetAtRoom.
+ * Debug guidance exposes recovery breadcrumbs; first_profile_recovery enables
+ * the one-time DR-02/DR-03 onboarding hint; location restrictions bind RESTORE
+ * to the terminal's physical department.
+ */
+void Floppy144TerminalConfigureSession(
+    Floppy144TerminalState *terminal,
+    bool debug_guidance,
+    bool first_profile_recovery,
+    bool restoration_location_restrictions
+);
+
+/*
+ * Add persistent operator identity to a newly-reset terminal transcript.
+ *
+ * authenticate=true adds the compact GDR verification sequence. false adds
+ * only the current operator line, allowing physical terminal re-entry to
+ * remain personalised without replaying the authentication ceremony.
+ */
+void Floppy144TerminalApplyOperatorIdentity(
+    Floppy144TerminalState *terminal,
+    const char *operator_name,
+    bool authenticate
+);
+
+void Floppy144TerminalMoveSelection(
+    Floppy144TerminalState *terminal,
+    int32_t direction
+);
+
+void Floppy144TerminalMoveDomain(
+    Floppy144TerminalState *terminal,
+    int32_t direction
+);
+
+void Floppy144TerminalInputCharacter(
+    Floppy144TerminalState *terminal,
+    char character
+);
+
+void Floppy144TerminalBackspace(
+    Floppy144TerminalState *terminal
+);
+
+/*
+ * Recall commands from the current terminal session. Negative direction
+ * moves toward older commands; positive direction moves toward newer ones.
+ */
+void Floppy144TerminalMoveHistory(
+    Floppy144TerminalState *terminal,
+    int32_t direction
+);
+
+bool Floppy144TerminalRecordPagerActive(
+    const Floppy144TerminalState *terminal
+);
+
+void Floppy144TerminalMoveRecordPager(
+    Floppy144TerminalState *terminal,
+    int32_t direction
+);
+
+void Floppy144TerminalCloseRecordPager(
+    Floppy144TerminalState *terminal
+);
+
+bool Floppy144TerminalHelpPagerActive(
+    const Floppy144TerminalState *terminal
+);
+
+/* Dynamic page count from the ordered manual and visible terminal text area. */
+uint32_t Floppy144TerminalHelpPageCount(
+    const Floppy144TerminalState *terminal
+);
+
+void Floppy144TerminalMoveHelpPager(
+    Floppy144TerminalState *terminal,
+    int32_t direction
+);
+
+void Floppy144TerminalCloseHelpPager(
+    Floppy144TerminalState *terminal
+);
+
+void Floppy144TerminalSubmitInput(
+    Floppy144TerminalState *terminal,
+    Floppy144WorldState *world,
+    Floppy144RunState *run_state
+);
+
+bool Floppy144TerminalRestoreInProgress(
+    const Floppy144TerminalState *terminal
+);
+
+uint32_t Floppy144TerminalRestoreProgressPercent(
+    const Floppy144TerminalState *terminal
+);
+
+void Floppy144TerminalAdvanceRestore(
+    Floppy144TerminalState *terminal,
+    Floppy144WorldState *world,
+    Floppy144RunState *run_state,
+    uint32_t elapsed_milliseconds
+);
+
+/*
+ * Append the next data-derived recovery action to the terminal transcript.
+ * The same helper is used after terminal commands and after a document closes,
+ * keeping the Prologue hand-off consistent without hard-coded story branches.
+ */
+void Floppy144TerminalPrintNextAction(
+    Floppy144TerminalState *pTerminal,
+    const Floppy144RunState *pRunState
+);
+
+/*
+ * Append recovery guidance after one document has been opened. Documents may
+ * opt into presenting all currently eligible branch-trigger choices.
+ */
+void Floppy144TerminalPrintPostOpenAction(
+    Floppy144TerminalState *pTerminal,
+    const Floppy144RunState *pRunState,
+    Floppy144CollectionId eCollection,
+    uint32_t uRecordIndex
+);
+
+void Floppy144TerminalCloseDetail(
+    Floppy144TerminalState *terminal
+);
+
+bool Floppy144TerminalCanOpenCatalogue(
+    const Floppy144TerminalState *terminal,
+    const Floppy144WorldState *world
+);
+
+bool Floppy144TerminalDetailOpen(
+    const Floppy144TerminalState *terminal
+);
+
+void Floppy144TerminalDraw(
+    Floppy144Surface *runtime,
+    const Floppy144TerminalState *terminal,
+    const Floppy144RunState *run_state
+);

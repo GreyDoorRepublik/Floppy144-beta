@@ -1,0 +1,501 @@
+name: Stage 4 Release Candidate Gate
+
+on:
+  push:
+    branches:
+      - development/stage-3c-complete
+      - Stage4
+      - development/Stage-4
+      - bugfix/13-grey-door-republik
+  workflow_dispatch:
+
+jobs:
+  # Independent continuation gate: execute every Stage 4D+ source regression
+  # even when the main sequential release-candidate job stops at an earlier
+  # failure. Aggregate results so one stale assertion cannot hide later ones.
+  stage4_post_bugfix_audit:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Regenerate canonical runtime data
+        shell: pwsh
+        run: .\\tools\\build_game_data.ps1
+      - name: Stage 4D onward independent regression sweep
+        shell: pwsh
+        run: .\\tools\\test_stage4_post_bugfix.ps1
+
+  stage3c:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Regenerate canonical runtime data
+        shell: pwsh
+        run: .\tools\build_game_data.ps1
+
+      - name: Verify canonical generated outputs are committed
+        shell: pwsh
+        run: |
+          $generated = @(
+            "game/src/floppy144_ambient.generated.inc",
+            "game/src/floppy144_collections.generated.def",
+            "game/src/floppy144_documents.generated.inc",
+            "game/src/floppy144_evidence.generated.def",
+            "game/src/floppy144_game_data.generated.inc",
+            "game/src/floppy144_interactions.generated.def",
+            "game/src/floppy144_physical_items.generated.inc",
+            "game/src/floppy144_runtime_ledger.generated.inc",
+            "game/src/floppy144_triggers.generated.def",
+            "game/src/site_layout.generated.jsonc",
+            "game/src/floppy144_site_generated.def",
+            "game/src/floppy144_collections.def",
+            "game/src/floppy144_triggers.def",
+            "game/src/floppy144_interactions.def",
+            "game/src/floppy144_evidence.def"
+          )
+
+          git diff --exit-code -- $generated
+          if($LASTEXITCODE -ne 0) {
+            throw "Canonical generated runtime data differs from committed output."
+          }
+
+      - name: Bug Fix 15 deterministic chair occupancy
+        shell: pwsh
+        run: .\tools\test_bugfix15_chairs.ps1
+
+      - name: Bug Fix 17 Security geometry regression
+        shell: pwsh
+        run: .\tools\test_bugfix17_security.ps1
+
+      - name: Stage 2 regression
+        shell: pwsh
+        run: .\tools\test_stage2.ps1
+
+      - name: Stage 3A regression
+        shell: pwsh
+        run: .\tools\test_stage3a.ps1
+
+      - name: Stage 3B regression
+        shell: pwsh
+        run: .\tools\test_stage3b.ps1
+
+      - name: Stage 4 platform boundary
+        shell: pwsh
+        run: .\tools\test_stage4_platform.ps1
+
+      - name: Stage 4 logical input
+        shell: pwsh
+        run: .\tools\test_stage4_input.ps1
+
+      - name: BF29/31/32/34 document and difficulty integration
+        shell: pwsh
+        run: .\tools\test_documents_difficulty.ps1
+
+      - name: Stage 4 persistence paths
+        shell: pwsh
+        run: .\tools\test_stage4_persistence.ps1
+
+      - name: Stage 4 audio contract
+        shell: pwsh
+        run: .\tools\test_stage4_audio.ps1
+
+      - name: Stage 4 timing and lifecycle
+        shell: pwsh
+        run: .\tools\test_stage4_timing_lifecycle.ps1
+
+      - name: Stage 4 single-instance protection
+        shell: pwsh
+        run: .\tools\test_stage4_single_instance.ps1
+
+      - name: Stage 4 developer configuration
+        shell: pwsh
+        run: .\tools\test_stage4_config.ps1
+
+      - name: Stage 4E deterministic variation
+        shell: pwsh
+        run: .\tools\test_stage4_variation.ps1
+
+      - name: Stage 4E platform-neutral calendar
+        shell: pwsh
+        run: .\tools\test_stage4_calendar.ps1
+
+      - name: Stage 4E date-aware noticeboard
+        shell: pwsh
+        run: .\tools\test_stage4_noticeboard.ps1
+
+      - name: Stage 4E deterministic takeaway menu
+        shell: pwsh
+        run: .\tools\test_stage4_takeaway.ps1
+
+      - name: Stage 4E deterministic crossword variants
+        shell: pwsh
+        run: .\tools\test_stage4_crossword.ps1
+
+      - name: Stage 4E deterministic paperback titles
+        shell: pwsh
+        run: .\tools\test_stage4_paperback.ps1
+
+      - name: Stage 4E archive density and record-identity audit
+        shell: pwsh
+        run: .\tools\test_stage4_archive.ps1
+
+      - name: Stage 4C operator profile screen
+        shell: pwsh
+        run: .\tools\test_stage4_profile_screen.ps1
+
+      - name: Stage 4C operator name entry
+        shell: pwsh
+        run: .\tools\test_stage4_profile_name.ps1
+
+      - name: Stage 4C terminal authentication
+        shell: pwsh
+        run: .\tools\test_stage4_terminal_auth.ps1
+
+      - name: Stage 4C persistent settings
+        shell: pwsh
+        run: .\tools\test_stage4_settings.ps1
+
+      - name: Stage 4C credits and attribution
+        shell: pwsh
+        run: .\tools\test_stage4_credits.ps1
+
+      - name: Stage 4C restored-session presentation
+        shell: pwsh
+        run: .\tools\test_stage4_reinstate_presentation.ps1
+
+      - name: Stage 4C bespoke completion presentation
+        shell: pwsh
+        run: .\tools\test_stage4_completion.ps1
+
+      - name: Stage 4D widened Help presentation
+        shell: pwsh
+        run: .\tools\test_stage4_help_presentation.ps1
+
+      - name: Stage 4D office camera scale
+        shell: pwsh
+        run: .\tools\test_stage4_office_camera.ps1
+
+      - name: Stage 4D directional player character
+        shell: pwsh
+        run: .\tools\test_stage4_player_visual.ps1
+
+      - name: Stage 4D pseudo-isometric Inspection containers
+        shell: pwsh
+        run: .\tools\test_stage4_inspection_25d.ps1
+
+      - name: Stage 4D presentation consistency
+        shell: pwsh
+        run: .\tools\test_stage4_presentation_consistency.ps1
+
+      - name: Stage 4D integration sign-off audit
+        shell: pwsh
+        run: .\tools\test_stage4d_integration.ps1
+
+      - name: Stage 4 build architecture
+        shell: pwsh
+        run: .\tools\test_stage4_build_architecture.ps1
+
+      - name: Stage 4B integration sign-off audit
+        shell: pwsh
+        run: .\tools\test_stage4b_integration.ps1
+
+      - name: Stage 4C integration sign-off audit
+        shell: pwsh
+        run: .\tools\test_stage4c_integration.ps1
+
+      - name: Stage 4E integration, determinism and replay audit
+        shell: pwsh
+        run: .\tools\test_stage4e_integration.ps1
+
+      - name: Stage 4F application icon source
+        shell: pwsh
+        run: .\tools\test_stage4f_application_icon.ps1 -Phase Source
+
+      - name: Stage 4F GDR connection intro
+        shell: pwsh
+        run: .\tools\test_stage4f_intro.ps1
+
+      - name: Stage 4F whole-game presentation journey
+        shell: pwsh
+        run: .\tools\test_stage4f_presentation_journey.ps1
+
+      - name: Stage 4G isolated Grey Door discovery
+        shell: pwsh
+        run: .\tools\test_stage4g_grey_door.ps1
+
+      - name: Stage 4 final source release-candidate gate
+        shell: pwsh
+        run: .\tools\test_stage4_final_gate.ps1 -Phase Source
+
+      - name: Install Premake
+        shell: pwsh
+        run: |
+          $url = "https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "premake.zip"
+          $dir = Join-Path $env:RUNNER_TEMP "premake"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $exe = Get-ChildItem -Path $dir -Recurse -Filter premake5.exe | Select-Object -First 1
+          if(-not $exe) { throw "premake5.exe was not found in downloaded archive." }
+          $exe.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate Visual Studio 2022 project
+        shell: pwsh
+        run: premake5 vs2022
+
+      - name: Verify generated application icon resource
+        shell: pwsh
+        run: .\tools\test_stage4f_application_icon.ps1 -Phase Generated
+
+      - name: Build Debug launcher with application icon
+        shell: pwsh
+        run: msbuild .\build\Floppy144.sln /t:Floppy144 /m /p:Configuration=debug /p:Platform=windows
+
+      - name: Verify Debug application icon
+        shell: pwsh
+        run: .\tools\test_stage4f_application_icon.ps1 -Phase Built -Executable .\bin\debug\Floppy144.exe
+
+      - name: Build portable Core target
+        shell: pwsh
+        run: msbuild .\build\Floppy144.sln /t:Floppy144Core /m /p:Configuration=release /p:Platform=windows /p:WarningLevel=Level4 /p:TreatWarningsAsErrors=true
+
+      - name: Build Win32 platform target
+        shell: pwsh
+        run: msbuild .\build\Floppy144.sln /t:Floppy144PlatformWin32 /m /p:Configuration=release /p:Platform=windows /p:WarningLevel=Level4 /p:TreatWarningsAsErrors=true
+
+      - name: Clean Release rebuild
+        shell: pwsh
+        run: msbuild .\build\Floppy144.sln /t:Rebuild /m /p:Configuration=release /p:Platform=windows /p:WarningLevel=Level4 /p:TreatWarningsAsErrors=true
+
+      - name: Verify Release application icon
+        shell: pwsh
+        run: .\tools\test_stage4f_application_icon.ps1 -Phase Built -Executable .\bin\release\Floppy144.exe
+
+      - name: Stage 4 final built-artifact gate
+        shell: pwsh
+        run: .\tools\test_stage4_final_gate.ps1 -Phase Built -ReleaseDirectory .\bin\release -Executable .\bin\release\Floppy144.exe
+
+      - name: Release size
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter Floppy144.exe | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
+          if(-not $exe) { throw "Release Floppy144.exe not found." }
+          Write-Host "Release bytes: $($exe.Length)"
+          if($exe.Length -gt 1474560) { throw "Release size gate failed." }
+
+      - name: Stage 4E reserve for Stage 4F and final QA
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter Floppy144.exe | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
+          if(-not $exe) { throw "Release executable missing for reserve check." }
+          $remaining = 1474560 - $exe.Length
+          Write-Host "Archive headroom: $remaining bytes (minimum 350000)."
+          if($remaining -lt 350000) { throw "S4E-08 safety reserve failed." }
+
+      - name: Package Stage 4 source
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP "Floppy144_Stage4_Source"
+          $zip = Join-Path $env:RUNNER_TEMP "Floppy144_Stage4_Source.zip"
+          if(Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+          if(Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+          git ls-files | Where-Object {
+            $extension = [IO.Path]::GetExtension($_).ToLowerInvariant()
+            $extension -notin @(".exe",".obj",".sav",".dat")
+          } | ForEach-Object {
+            $source = Join-Path $PWD $_
+            $target = Join-Path $staging $_
+            $parent = Split-Path -Parent $target
+            if($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            Copy-Item -LiteralPath $source -Destination $target
+          }
+
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -Force
+
+      - name: Verify Stage 4 source package
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "Floppy144_Stage4_Source.zip"
+          $verify = Join-Path $env:RUNNER_TEMP "Floppy144_Stage4_Source_Verify"
+          if(Test-Path -LiteralPath $verify) { Remove-Item -LiteralPath $verify -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $verify -Force
+
+          foreach($required in @("LICENSE","premake5.lua","game\src\floppy144_main.c","include\f144_platform.h")) {
+            if(-not (Test-Path -LiteralPath (Join-Path $verify $required) -PathType Leaf)) {
+              throw "Stage 4 source package missing: $required"
+            }
+          }
+
+          $forbidden = @(Get-ChildItem -LiteralPath $verify -Recurse -File | Where-Object {
+            $_.Extension.ToLowerInvariant() -in @(".exe",".obj",".sav",".dat")
+          })
+          if($forbidden.Count -ne 0) {
+            $forbidden.FullName | Write-Host
+            throw "Stage 4 source package contains compiled tool/runtime-state artefacts."
+          }
+
+          Write-Host "STAGE 4 SOURCE PACKAGE: PASS"
+
+      - name: Upload Stage 4 source
+        uses: actions/upload-artifact@v4
+        with:
+          name: Floppy144-Stage4-Source
+          path: ${{ runner.temp }}\Floppy144_Stage4_Source.zip
+          if-no-files-found: error
+
+      # The independent root entry points must be tested as actual Windows
+      # commands. CI's existing release gates above remain unchanged.
+      - name: Validate standalone testbuild and run workflows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== STANDALONE testbuild.ps1 ==="
+          .\testbuild.ps1
+          if($LASTEXITCODE -ne 0) { throw "Standalone testbuild returned $LASTEXITCODE." }
+
+          Write-Host "=== STANDALONE run.ps1 ==="
+          .\run.ps1 -build release
+          if($LASTEXITCODE -ne 0) { throw "Standalone run returned $LASTEXITCODE." }
+
+          $runSource = Get-Content -LiteralPath .\run.ps1 -Raw
+          if($runSource -match 'test_stage[234]' -or $runSource -match 'testbuild\.ps1') {
+            throw "run.ps1 still invokes extracted regressions."
+          }
+          $testSource = Get-Content -LiteralPath .\testbuild.ps1 -Raw
+          if($testSource -match '(?m)^\s*&\s+.*run\.ps1') {
+            throw "testbuild.ps1 invokes run.ps1 rather than its own tests."
+          }
+          Write-Host "STANDALONE TEST / RUN: PASS"
+
+      - name: Validate cleanbuild order and failure short-circuit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== CLEAN BUILD: DIFF / CLEAN / TEST / BUILD ==="
+          .\cleanbuild.ps1
+          if($LASTEXITCODE -ne 0) { throw "Standalone cleanbuild returned $LASTEXITCODE." }
+          if(-not (Test-Path -LiteralPath .\bin\release\Floppy144.exe)) {
+            throw "Successful cleanbuild did not produce the Release executable."
+          }
+          Write-Host "CLEAN BUILD COMPLETE: PASS"
+
+          # Temporary and reversible fixture, never committed. The initial
+          # cleanbuild cleanup removes its solution; Stage 2 fails before any
+          # run.ps1 Premake/MSBuild invocation can recreate that solution.
+          $fixture = Join-Path $PWD 'tools\test_stage2.ps1'
+          $original = [IO.File]::ReadAllBytes($fixture)
+          try {
+            [IO.File]::WriteAllText(
+              $fixture, "throw 'INJECTED STAGE 2 FAILURE (CI-ONLY)'"
+            )
+            $failureSeen = $false
+            try {
+              .\cleanbuild.ps1
+            }
+            catch {
+              $failureSeen = $true
+              Write-Host "Expected injected test failure propagated: $($_.Exception.Message)"
+            }
+            if(-not $failureSeen) {
+              throw "cleanbuild failed to propagate the injected test failure."
+            }
+            if(Test-Path -LiteralPath .\build\Floppy144.sln) {
+              throw "run.ps1 was reached after a failed regression."
+            }
+            Write-Host "CLEAN BUILD FAILED-TEST SHORT-CIRCUIT: PASS"
+          }
+          finally {
+            [IO.File]::WriteAllBytes($fixture, $original)
+          }
+          git diff --exit-code -- tools/test_stage2.ps1
+          if($LASTEXITCODE -ne 0) {
+            throw "Temporary regression fixture was not restored cleanly."
+          }
+          Write-Host "ROOT THREE-WORKFLOW ACCEPTANCE: PASS"
+
+  audio-integration:
+    name: Audio integration / release build
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Original MIDI and F144SFX contract tests
+        shell: pwsh
+        run: .\tools\test_stage4_audio.ps1
+
+      - name: BF21-24 focused audio regressions
+        shell: pwsh
+        run: |
+          .\tools\test_bugfix21_backspace.ps1
+          .\tools\test_bugfix22_music.ps1
+          .\tools\test_bugfix23_24_audio.ps1
+
+      - name: Platform/source ownership audit
+        shell: pwsh
+        run: .\tools\test_stage4_build_architecture.ps1
+
+      - name: Build standalone audio listening harness and waveform evidence
+        shell: pwsh
+        run: |
+          .\tools\build_audio_review.ps1
+          .\tools\test_bf24_review_package.ps1
+
+      - name: Install Premake
+        shell: pwsh
+        run: |
+          $url = "https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "premake.zip"
+          $dir = Join-Path $env:RUNNER_TEMP "premake"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $exe = Get-ChildItem -Path $dir -Recurse -Filter premake5.exe | Select-Object -First 1
+          if(-not $exe) { throw "premake5.exe unavailable" }
+          $exe.Directory.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Generate VS solution
+        shell: pwsh
+        run: premake5 vs2022
+
+      - name: Clean Release build
+        shell: pwsh
+        run: msbuild .\build\Floppy144.sln /t:Rebuild /m /p:Configuration=release /p:Platform=windows /p:WarningLevel=Level4 /p:TreatWarningsAsErrors=true
+
+      - name: Floppy size gate
+        shell: pwsh
+        run: |
+          $exe = Get-Item .\bin\release\Floppy144.exe
+          Write-Host "Final linked Floppy144.exe bytes: $($exe.Length)"
+          if($exe.Length -gt 1474560) {
+            throw "Release executable exceeds 1,474,560 byte limit"
+          }
+
+      - name: Upload audio comparison harness
+        uses: actions/upload-artifact@v4
+        with:
+          name: bf21-24-audio-review
+          path: build/audio-review/
+          if-no-files-found: error

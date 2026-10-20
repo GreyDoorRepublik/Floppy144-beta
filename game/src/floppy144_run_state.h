@@ -1,0 +1,457 @@
+#pragma once
+
+#include "floppy144_collection.h"
+#include "floppy144_trigger.h"
+#include "floppy144_interaction.h"
+#include "floppy144_evidence.h"
+#include "floppy144_notebook.h"
+#include "floppy144_capability.h"
+#include "floppy144_room.h"
+#include "floppy144_object.h"
+#include "floppy144_projection.h"
+
+#include <stdint.h>
+#include <stdbool.h>
+
+
+/*
+ * Floppy//144 run state
+ *
+ * This is the authoritative state for one recovery session.
+ *
+ * Pass 2A introduces the structure alongside the existing prototype world
+ * state. Gameplay is migrated into it incrementally in later passes.
+ */
+
+#define FLOPPY144_RECOVERY_CAPACITY_KB 1440U
+#define FLOPPY144_NOTEBOOK_ORDER_MAX 128U
+/* BF18/BF34: fixed legacy Notebook history, separate versioned record-opened ledger. */
+#define FLOPPY144_RECORD_OPENED_SLOTS_PER_COLLECTION 128U
+#define FLOPPY144_DOCUMENT_NOTE_CAPACITY 192U
+#define FLOPPY144_RECORD_OPENED_BITS (FLOPPY144_COLLECTION_COUNT * FLOPPY144_RECORD_OPENED_SLOTS_PER_COLLECTION)
+
+#define FLOPPY144_RUN_WORD_BITS             32
+
+/* STAGE 3B.5 SECURE CABINET STATE */
+#define FLOPPY144_SECURE_CABINET_MAX          32U
+
+#define FLOPPY144_RUN_WORD_COUNT(capacity) \
+(((capacity) + FLOPPY144_RUN_WORD_BITS - 1) / FLOPPY144_RUN_WORD_BITS)
+
+/* BF31/BF32: zero safely migrates legacy saves. */
+typedef enum Floppy144Difficulty
+{
+    FLOPPY144_DIFFICULTY_NORMAL = 0,
+    FLOPPY144_DIFFICULTY_EASY = 1,
+    FLOPPY144_DIFFICULTY_REALLY_SUPER_EASY = 2,
+    FLOPPY144_DIFFICULTY_COUNT
+} Floppy144Difficulty;
+
+/* Inline avoids coupling renderer-only tests to the gameplay runtime. */
+static inline const char *Floppy144DifficultyName(Floppy144Difficulty difficulty)
+{
+    switch(difficulty)
+    {
+        case FLOPPY144_DIFFICULTY_NORMAL: return "NORMAL";
+        case FLOPPY144_DIFFICULTY_EASY: return "EASY";
+        case FLOPPY144_DIFFICULTY_REALLY_SUPER_EASY:
+            return "REALLY SUPER EASY (I MEAN REALLY STUPIDLY EASY)";
+        default: return "NORMAL";
+    }
+}
+
+typedef enum Floppy144RunAct
+{
+    FLOPPY144_RUN_ACT_PROLOGUE = 0,
+    FLOPPY144_RUN_ACT_I,
+    FLOPPY144_RUN_ACT_II,
+    FLOPPY144_RUN_ACT_III,
+    FLOPPY144_RUN_ACT_COMPLETE
+}
+Floppy144RunAct;
+
+typedef enum Floppy144RunBranch
+{
+    FLOPPY144_RUN_BRANCH_NONE = 0,
+    FLOPPY144_RUN_BRANCH_RECORDS_FIRST,
+    FLOPPY144_RUN_BRANCH_TECHNOLOGY_FIRST
+}
+Floppy144RunBranch;
+
+/* Isolated one-shot state, never stored in any collection/trigger/evidence bit. */
+typedef enum Floppy144GreyDoorState
+{
+    FLOPPY144_GREY_DOOR_UNAVAILABLE = 0,
+    FLOPPY144_GREY_DOOR_AVAILABLE = 1,
+    FLOPPY144_GREY_DOOR_COMPLETED = 2
+} Floppy144GreyDoorState;
+
+typedef enum Floppy144OpeningRecoveryStep
+{
+    FLOPPY144_OPENING_NEEDS_LIST = 0,
+    FLOPPY144_OPENING_COLLECTIONS_LISTED = 1,
+    FLOPPY144_OPENING_DR01_RECORDS_LISTED = 2,
+    FLOPPY144_OPENING_FIRST_RECORD_OPENED = 3
+} Floppy144OpeningRecoveryStep;
+
+typedef struct Floppy144RunState
+{
+    uint32_t recovery_seed;
+
+    uint8_t act;
+    uint8_t branch;
+    uint8_t dirty;
+
+    uint8_t projection;
+    uint8_t archive_services_initialised;
+    uint8_t opening_recovery_step; /* per-run tutorial; persisted in V4 */
+    uint8_t grey_door_state; /* S4G per-run save field */
+    uint8_t hathaway_inspection; /* S4H: RAM-only, never encoded */
+    uint8_t difficulty; /* BF31/BF32: persisted in save V6 */
+
+    int32_t player_site_x;
+    int32_t player_site_y;
+
+    /* Persistent per-cabinet unlocks for the current recovery. */
+    uint32_t secure_cabinets_unlocked;
+
+    uint32_t rooms[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_ROOM_COUNT)
+    ];
+
+    uint32_t objects_visible[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_OBJECT_COUNT)
+    ];
+
+    uint32_t objects_unlocked[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_OBJECT_COUNT)
+    ];
+
+    uint32_t objects_open[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_OBJECT_COUNT)
+    ];
+
+    uint32_t collections[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_COLLECTION_COUNT)
+    ];
+
+    uint32_t triggers[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_TRIGGER_COUNT)
+    ];
+
+    uint32_t interactions[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_INTERACTION_COUNT)
+    ];
+
+    uint32_t evidence[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_EVIDENCE_COUNT)
+    ];
+
+    uint32_t notebook[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_NOTEBOOK_COUNT)
+    ];
+
+    /* Stage 3C: persistent chronological acquisition order for Notebook prose. */
+    uint16_t notebook_order[FLOPPY144_NOTEBOOK_ORDER_MAX];
+    uint16_t notebook_order_count;
+
+    uint32_t capabilities[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_CAPABILITY_COUNT)
+    ];
+
+    /* Canonical per-record OPENED state for both authored and procedural records. */
+    uint32_t records_opened[
+        FLOPPY144_RUN_WORD_COUNT(FLOPPY144_RECORD_OPENED_BITS)
+    ];
+    /* First-open order, separate from the immutable 128-slot legacy Notebook. */
+    uint16_t document_note_order[FLOPPY144_DOCUMENT_NOTE_CAPACITY];
+    uint16_t document_note_count;
+}
+Floppy144RunState;
+
+Floppy144RunAct Floppy144RunStateAct
+(
+    const Floppy144RunState *pState
+);
+
+bool Floppy144RunStateSetAct
+(
+    Floppy144RunState *pState,
+    Floppy144RunAct eAct
+);
+
+bool Floppy144RunStateIsIsometric
+(
+    const Floppy144RunState *pState
+);
+
+bool Floppy144RunStateSetBranch
+(
+    Floppy144RunState *state,
+    Floppy144RunBranch branch
+);
+
+bool Floppy144RunStateArchiveServicesInitialised
+(
+    const Floppy144RunState *state
+);
+
+bool Floppy144RunStateInitialiseArchiveServices
+(
+    Floppy144RunState *state
+);
+
+bool Floppy144RunStateRoomReconstructed
+(
+    const Floppy144RunState *state,
+ Floppy144RoomId room
+);
+
+bool Floppy144RunStateReconstructRoom
+(
+    Floppy144RunState *state,
+ Floppy144RoomId room
+);
+
+uint32_t Floppy144RunStateRecoveredKb(const Floppy144RunState *pState);
+uint32_t Floppy144RunStateFreeKb(const Floppy144RunState *pState);
+uint32_t Floppy144RunStateRecoveredPercent(const Floppy144RunState *pState);
+void Floppy144RunStateFormatCapacity(const Floppy144RunState *pState,char *pszBuffer,uint32_t uBufferCapacity);
+uint32_t Floppy144RunStateRequiredTotalKb(void);
+uint32_t Floppy144RunStateRequiredRecoveredKb(const Floppy144RunState *pState);
+uint32_t Floppy144RunStateRequiredCoveragePercent(const Floppy144RunState *pState);
+bool Floppy144RunStateAnyUnrestoredCollectionFits(const Floppy144RunState *pState);
+bool Floppy144RunStateAvailableRecoveryCapacityExhausted(const Floppy144RunState *pState);
+bool Floppy144RunStateRecoveryExhausted(const Floppy144RunState *pState);
+
+/* Legacy display-name compatibility: now derived from KB. */
+uint32_t Floppy144RunStateReconstructionPercent
+(
+    const Floppy144RunState *state
+);
+
+bool Floppy144RunStateObjectVisible
+(
+    const Floppy144RunState *state,
+ Floppy144ObjectId object
+);
+
+bool Floppy144RunStateRevealObject
+(
+    Floppy144RunState *state,
+ Floppy144ObjectId object
+);
+
+Floppy144ObjectAccessState Floppy144RunStateObjectAccessState
+(
+    const Floppy144RunState *state,
+ Floppy144ObjectId object
+);
+
+bool Floppy144RunStateSetObjectAccessState
+(
+    Floppy144RunState *state,
+ Floppy144ObjectId object,
+ Floppy144ObjectAccessState access_state
+);
+
+/* Stage 3B.5: generated secure-cabinet unlock state. */
+bool Floppy144RunStateSecureCabinetUnlocked(
+    const Floppy144RunState *state,
+    uint32_t uCabinetIndex
+);
+
+bool Floppy144RunStateUnlockSecureCabinet(
+    Floppy144RunState *state,
+    uint32_t uCabinetIndex
+);
+
+bool Floppy144RunStateBitGet
+(
+    const uint32_t *words,
+    uint32_t bit
+);
+
+bool Floppy144RunStateBitSet
+(
+    uint32_t *words,
+    uint32_t bit
+);
+
+bool Floppy144RunStateBitClear
+(
+    uint32_t *words,
+    uint32_t bit
+);
+
+bool Floppy144RunStateCollectionAvailable
+(
+    const Floppy144RunState *state,
+ Floppy144CollectionId collection
+);
+
+bool Floppy144RunStateCollectionRestored
+(
+    const Floppy144RunState *state,
+ Floppy144CollectionId collection
+);
+
+bool Floppy144RunStateCanRestoreCollection(
+    const Floppy144RunState *state,
+    Floppy144CollectionId collection
+);
+
+bool Floppy144RunStateRestoreCollection
+(
+    Floppy144RunState *state,
+ Floppy144CollectionId collection
+);
+
+bool Floppy144RunStateTriggerFired
+(
+    const Floppy144RunState *state,
+ Floppy144TriggerId trigger
+);
+
+bool Floppy144RunStateFireTrigger
+(
+    Floppy144RunState *state,
+ Floppy144TriggerId trigger
+);
+
+bool Floppy144RunStateInteractionCompleted
+(
+    const Floppy144RunState *state,
+ Floppy144InteractionId interaction
+);
+
+bool Floppy144RunStateCompleteInteraction
+(
+    Floppy144RunState *state,
+ Floppy144InteractionId interaction
+);
+
+bool Floppy144RunStateEvidenceEstablished
+(
+    const Floppy144RunState *state,
+ Floppy144EvidenceId evidence
+);
+
+bool Floppy144RunStateEstablishEvidence
+(
+    Floppy144RunState *state,
+ Floppy144EvidenceId evidence
+);
+
+bool Floppy144RunStateNotebookEntryRecorded
+(
+    const Floppy144RunState *state,
+ Floppy144NotebookId entry
+);
+
+bool Floppy144RunStateRecordNotebookEntry
+(
+    Floppy144RunState *state,
+ Floppy144NotebookId entry
+);
+
+bool Floppy144RunStateAppendNotebookEntry(
+    Floppy144RunState *pState,
+    uint32_t uNotebookOrdinal
+);
+
+bool Floppy144RunStateHasCapability
+(
+    const Floppy144RunState *state,
+ Floppy144CapabilityId capability
+);
+
+bool Floppy144RunStateGrantCapability
+(
+    Floppy144RunState *state,
+ Floppy144CapabilityId capability
+);
+
+void Floppy144RunStateSetPlayerSitePosition
+(
+    Floppy144RunState *state,
+ int32_t x,
+ int32_t y
+);
+
+/* Independent seed domain: slot indexes a vetted candidate list, not world coordinates. */
+bool Floppy144RunStateGreyDoorDiscover(Floppy144RunState *state);
+bool Floppy144RunStateGreyDoorComplete(Floppy144RunState *state);
+
+/*
+ * Manual recovery records normally take priority over autosave. If the
+ * matching run's later autosave has permanently consumed the Grey Door,
+ * prefer that autosave to avoid reviving a completed anomaly on restart.
+ * NEVER merge across different recovery seeds or persist the result in
+ * Profile-level statistics.
+ */
+bool Floppy144RunStateGreyDoorCompletedAutosavePreferred(
+    const Floppy144RunState *manual,
+    const Floppy144RunState *autosave
+);
+uint32_t Floppy144RunStateGreyDoorPlacementSlot(
+    const Floppy144RunState *state, uint32_t candidate_count
+);
+
+/* Non-persistent, synthetic all-restored visual inspection snapshot. */
+void Floppy144RunStateEnableHathawayInspection(Floppy144RunState *state);
+
+bool Floppy144RunStateRecordOpened(
+    const Floppy144RunState *state,
+    Floppy144CollectionId collection,
+    uint32_t record_index
+);
+bool Floppy144RunStateMarkRecordOpened(
+    Floppy144RunState *state,
+    Floppy144CollectionId collection,
+    uint32_t record_index
+);
+bool Floppy144RunStateAppendDocumentNote(
+    Floppy144RunState *state,
+    uint32_t authored_ordinal
+);
+
+void Floppy144RunStateReset
+(
+    Floppy144RunState *state
+);
+
+void Floppy144RunStateBegin
+(
+    Floppy144RunState *state,
+    uint32_t recovery_seed
+);
+
+Floppy144Projection Floppy144RunStateProjection
+(
+    const Floppy144RunState *state
+);
+
+bool Floppy144RunStateSetProjection
+(
+    Floppy144RunState *state,
+ Floppy144Projection projection
+);
+
+/*
+ * Query whether one movement step would leave the reconstructed Site through
+ * an unlocked exterior door. The query does not move the player.
+ */
+bool Floppy144RunStateWouldExitSite
+(
+    const Floppy144RunState *state,
+    int32_t delta_x16,
+    int32_t delta_y16
+);
+
+bool Floppy144RunStateMovePlayerSite
+(
+    Floppy144RunState *state,
+ int32_t delta_x16,
+ int32_t delta_y16
+);

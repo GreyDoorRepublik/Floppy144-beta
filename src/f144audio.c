@@ -1,0 +1,1127 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <mmsystem.h>
+#include <stdint.h>
+#include <string.h>
+#include "f144audio.h"
+
+#pragma comment(lib, "winmm.lib")
+
+/*
+    F144MIDI v0.7
+    =============
+    30-minute Bureaucratic Loop preserving the original F144MIDI v0.7
+    orchestration, with a staged final-minute return to the base theme.
+    Layers develop every five minutes; corruption adds floor(restoration/3).
+
+    80 BPM, 4/4
+    1 bar = 3 seconds
+    600 bars = 30 minutes
+
+      Bars  0- 9 : Intro          0:00 - 0:30
+      Bars 10-24 : Layer A        0:30 - 1:15
+      Bars 25-39 : Layer B        1:15 - 2:00
+      Bars 40-89 : Full Loop      2:00 - 4:30
+      Bars 90-99 : Outro / Reset  4:30 - 5:00
+
+    v0.7 outro:
+      90-91 : full material starts receding
+      92-93 : pad gone, melody + paperwork thinning
+      94-95 : melody gone, paperwork thinning
+      96-97 : pizzicato remnants only
+      98-99 : bare clockwork, itself fading
+*/
+
+#define F144_BPM           80.0
+#define F144_STEPS_PER_BAR 16u
+#define F144_TOTAL_STEPS   9600u
+#define F144_STEP_SECONDS  (60.0 / F144_BPM / 4.0)
+/* BF22 independent menu cycle. The 600-bar gameplay scheduler is untouched. */
+#define F144_MENU_BPM           110.0
+#define F144_MENU_BARS          32u
+#define F144_MENU_TOTAL_STEPS   (F144_MENU_BARS * F144_STEPS_PER_BAR)
+/* Both office scenes share one clock but retain independent arrangement state. */
+#define F144_COMPLETION_BPM         F144_MENU_BPM
+#define F144_COMPLETION_BARS        32u
+#define F144_COMPLETION_TOTAL_STEPS (F144_COMPLETION_BARS * F144_STEPS_PER_BAR)
+
+#define CH_MARIMBA  0u
+#define CH_BASS     1u
+#define CH_PIZZ     2u
+#define CH_CLARINET 3u
+#define CH_PAD      4u
+#define CH_DRUMS    9u
+#define CH_COUNTER  5u
+#define CH_EXTRA_PIZZ 6u
+
+enum F144Section {
+    SEC_INTRO = 0,
+    SEC_LAYER_A,
+    SEC_LAYER_B,
+    SEC_FULL,
+    SEC_OUTRO
+};
+
+static HMIDIOUT g_out = NULL;
+static int      g_available = 0;
+static int      g_playing = 0;
+static unsigned g_step = 0;
+static double   g_accum = 0.0;
+
+static uint8_t g_last_note[16];
+static uint8_t g_note_active[16];
+/* Plays once on entering the completion scene, never on ordinary loop wrap. */
+static uint8_t g_completion_intro_pending=0u;
+
+static char g_device_name[128] = "Unavailable";
+
+static float    g_music_volume = 0.85f;
+static F144Act  g_act = F144_ACT_PROLOGUE;
+static F144MusicScene g_scene = F144_MUSIC_GAMEPLAY;
+static uint32_t g_seed = 0xF1441962u;
+static unsigned g_restoration = 0u;
+static uint8_t g_distortion = 0u;
+
+static const uint8_t g_channel_volume[16] = {
+    118,112,102,108,92,100,100,100,100,105,100,100,100,100,100,100
+};
+
+static uint8_t scale7(uint8_t value, float scale)
+{
+    float v = (float)value * scale;
+    if (v < 0.0f) v = 0.0f;
+    if (v > 127.0f) v = 127.0f;
+    return (uint8_t)(v + 0.5f);
+}
+
+static void send_raw(uint8_t status, uint8_t d1, uint8_t d2)
+{
+    DWORD msg;
+
+    if (!g_available || !g_out)
+        return;
+
+    msg = (DWORD)status |
+          ((DWORD)d1 << 8) |
+          ((DWORD)d2 << 16);
+
+    midiOutShortMsg(g_out, msg);
+}
+
+static void program(uint8_t ch, uint8_t p)
+{
+    send_raw((uint8_t)(0xC0u | ch), p, 0);
+}
+
+static void cc(uint8_t ch, uint8_t controller, uint8_t value)
+{
+    send_raw((uint8_t)(0xB0u | ch), controller, value);
+}
+
+static void apply_master_volume(void)
+{
+    unsigned ch;
+
+    if (!g_available)
+        return;
+
+    for (ch = 0; ch < 16u; ++ch)
+        cc((uint8_t)ch, 7u,
+           scale7(g_channel_volume[ch], g_music_volume));
+}
+
+void F144_MusicSetVolume(float volume)
+{
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 1.0f) volume = 1.0f;
+
+    g_music_volume = volume;
+    apply_master_volume();
+}
+
+float F144_MusicGetVolume(void)
+{
+    return g_music_volume;
+}
+
+/* BF22: transitions reset only when changing music scene, not per Act. */
+F144MusicScene F144_MusicGetScene(void) {return g_scene;}
+void F144_MusicSetScene(F144MusicScene scene)
+{
+    if(scene<F144_MUSIC_GAMEPLAY||scene>F144_MUSIC_COMPLETION)
+        scene=F144_MUSIC_GAMEPLAY;
+    if(scene==g_scene)return;
+    g_scene=scene;
+    g_completion_intro_pending=(uint8_t)(scene==F144_MUSIC_COMPLETION);
+    if(!g_available)return;
+    if(scene==F144_MUSIC_GAMEPLAY)
+    {
+        /* Restore every GM voice used by the approved original composition. */
+        program(CH_MARIMBA,12u);
+        program(CH_BASS,32u);
+        program(CH_PIZZ,45u);
+        program(CH_CLARINET,71u);
+        program(CH_PAD,48u);
+        program(CH_COUNTER,71u);
+        program(CH_EXTRA_PIZZ,45u);
+    }
+    else if(scene==F144_MUSIC_MENU)
+    {
+        /* GM program changes are zero-based: marimba, acoustic bass,
+           pizzicato typing, electric-piano chords and celesta replies. */
+        program(CH_MARIMBA,12u);
+        program(CH_BASS,32u);
+        program(CH_PIZZ,45u);
+        program(CH_PAD,4u);
+        program(CH_COUNTER,8u);
+    }
+    else
+    {
+        /* A Completed Product Has Been Delivered: familiar office timbres
+           in a restrained, half-time miniature. Zero-based GM programs. */
+        program(CH_MARIMBA,4u);     /* #5 electric piano lead */
+        program(CH_BASS,32u);       /* #33 acoustic bass */
+        program(CH_PIZZ,45u);       /* #46 pizzicato typing */
+        program(CH_CLARINET,10u);   /* #11 music box */
+        program(CH_PAD,48u);        /* #49 string ensemble */
+        program(CH_COUNTER,8u);     /* #9 celesta */
+        program(CH_EXTRA_PIZZ,12u); /* #13 marimba echo */
+    }
+    if(g_playing)F144_MusicRestart();
+}
+
+void F144_MusicSetAct(F144Act act)
+{
+    if (act < F144_ACT_PROLOGUE)
+        act = F144_ACT_PROLOGUE;
+
+    if (act > F144_ACT_III)
+        act = F144_ACT_III;
+
+    g_act = act;
+}
+
+F144Act F144_MusicGetAct(void)
+{
+    return g_act;
+}
+
+void F144_MusicSetSeed(uint32_t seed)
+{
+    g_seed = seed ? seed : 0xF1441962u;
+}
+
+uint32_t F144_MusicGetSeed(void)
+{
+    return g_seed;
+}
+
+void F144_MusicSetRestoration(unsigned percent)
+{
+    g_restoration = percent;
+    g_distortion = (uint8_t)((percent / 3u) > 100u ? 100u : percent / 3u);
+}
+
+unsigned F144_MusicGetRestoration(void) { return g_restoration; }
+unsigned F144_MusicGetDistortion(void) { return (unsigned)g_distortion; }
+
+/* Deterministic corruption hash. */
+static uint32_t hash32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static uint32_t event_hash(
+    uint8_t ch, uint8_t note, unsigned bar, unsigned step)
+{
+    uint32_t x = g_seed;
+
+    x ^= (uint32_t)ch   * 0x9e3779b9u;
+    x ^= (uint32_t)note * 0x85ebca6bu;
+    x ^= (uint32_t)bar  * 0xc2b2ae35u;
+    x ^= (uint32_t)step * 0x27d4eb2du;
+
+    return hash32(x);
+}
+
+static unsigned pitch_chance(uint8_t ch)
+{
+    switch (g_act) {
+        case F144_ACT_PROLOGUE:
+            return 0u;
+
+        case F144_ACT_I:
+            return (ch == CH_CLARINET) ? 55u : 0u;
+
+        case F144_ACT_II:
+            if (ch == CH_CLARINET) return 120u;
+            if (ch == CH_PIZZ)     return 45u;
+            if (ch == CH_BASS)     return 25u;
+            return 0u;
+
+        case F144_ACT_III:
+            if (ch == CH_CLARINET) return 230u;
+            if (ch == CH_PIZZ)     return 115u;
+            if (ch == CH_BASS)     return 80u;
+            if (ch == CH_MARIMBA)  return 60u;
+            return 0u;
+    }
+
+    return 0u;
+}
+
+static int corrupt_note(
+    uint8_t ch, uint8_t *note, unsigned bar, unsigned step)
+{
+    uint32_t h;
+    unsigned chance;
+    unsigned mode;
+    int n;
+
+    if (ch == CH_DRUMS)
+        return 1;
+
+    h = event_hash(ch, *note, bar, step);
+    chance = pitch_chance(ch);
+    /* Restoration increases distortion by floor(percent/3), independent
+       of Act-specific baseline corruption. Prologue remains clean at 0%. */
+    chance += (unsigned)g_distortion * 6u;
+    if (chance > 930u) chance = 930u;
+
+    if ((h % 1000u) >= chance)
+        return 1;
+
+    mode = (h >> 16) % 100u;
+    n = *note;
+
+    if (g_act == F144_ACT_PROLOGUE || g_act == F144_ACT_I) {
+        n += (mode & 1u) ? 1 : -1;
+    }
+    else if (g_act == F144_ACT_II) {
+        if (mode < 85u)
+            n += (mode & 1u) ? 1 : -1;
+        else if (mode < 95u)
+            n += (mode & 1u) ? 2 : -2;
+        else
+            n += (mode & 1u) ? 12 : -12;
+    }
+    else {
+        if (ch == CH_BASS && mode >= 78u)
+            n += 6;
+        else if (mode < 60u)
+            n += (mode & 1u) ? 1 : -1;
+        else if (mode < 82u)
+            n += (mode & 1u) ? 2 : -2;
+        else if (mode < 92u)
+            n += (mode & 1u) ? 6 : -6;
+        else
+            n += (mode & 1u) ? 12 : -12;
+    }
+
+    if (n < 0)   n = 0;
+    if (n > 127) n = 127;
+
+    *note = (uint8_t)n;
+    return 1;
+}
+
+static void note_off(uint8_t ch, uint8_t note)
+{
+    send_raw((uint8_t)(0x80u | ch), note, 0);
+}
+
+static void mono_note(
+    uint8_t ch,
+    uint8_t note,
+    uint8_t velocity,
+    float gain,
+    unsigned bar,
+    unsigned step)
+{
+    if (g_note_active[ch])
+        note_off(ch, g_last_note[ch]);
+
+    if (!corrupt_note(ch, &note, bar, step)) {
+        g_note_active[ch] = 0;
+        return;
+    }
+
+    velocity = scale7(velocity, 1.35f * gain);
+
+    if (velocity == 0u) {
+        g_note_active[ch] = 0;
+        return;
+    }
+
+    send_raw((uint8_t)(0x90u | ch), note, velocity);
+
+    g_last_note[ch] = note;
+    g_note_active[ch] = 1;
+}
+
+static void mono_silence(uint8_t ch)
+{
+    if (g_note_active[ch]) {
+        note_off(ch, g_last_note[ch]);
+        g_note_active[ch] = 0;
+    }
+}
+
+static void channel_silence(uint8_t ch)
+{
+    cc(ch, 123u, 0u);
+    g_note_active[ch] = 0;
+}
+
+static void all_notes_off(void)
+{
+    unsigned ch;
+
+    for (ch = 0; ch < 16u; ++ch) {
+        cc((uint8_t)ch, 123u, 0u);
+        g_note_active[ch] = 0;
+    }
+}
+
+static enum F144Section section_for_bar(unsigned bar)
+{
+    if (bar >= 580u) return SEC_OUTRO;
+    if (bar < 10u) return SEC_INTRO;
+    if (bar < 25u) return SEC_LAYER_A;
+    if (bar < 40u) return SEC_LAYER_B;
+    return SEC_FULL;
+}
+
+/* One new secondary layer joins at each five-minute boundary. */
+static unsigned layers_for_bar(unsigned bar)
+{
+    if (bar >= 580u) return 0u;
+    return bar / 100u;
+}
+
+static uint8_t root_for_bar(unsigned bar)
+{
+    return ((bar / 2u) & 1u) ? 47u : 45u;
+}
+
+/* Clockwork remains the spine of the whole cue.
+   It only starts fading during the final four bars. */
+static float clockwork_gain(unsigned bar)
+{
+    if (bar < 592u) return 1.00f;
+    return 0.9f - 0.08f * (float)(bar - 592u);
+}
+
+static void clockwork(unsigned bar, unsigned step)
+{
+    uint8_t root = root_for_bar(bar);
+    uint8_t fifth = (uint8_t)(root + 7u);
+    uint8_t mnote;
+    float gain = clockwork_gain(bar);
+
+    /* Final bar is deliberately sparse to leave a breath before restart. */
+    if (bar == 599u && step >= 8u) {
+        if (step == 8u) {
+            mono_silence(CH_MARIMBA);
+            mono_silence(CH_BASS);
+        }
+        return;
+    }
+
+    if ((step & 3u) == 0u) {
+        switch (step >> 2) {
+            case 0:
+                mnote = (uint8_t)(root + 12u);
+                break;
+            case 1:
+                mnote = (uint8_t)(fifth + 12u);
+                break;
+            case 2:
+                mnote = (uint8_t)(root + 12u);
+                break;
+            default:
+                mnote = (uint8_t)(fifth + 12u);
+                break;
+        }
+
+        mono_note(
+            CH_MARIMBA,
+            mnote,
+            (uint8_t)((step == 0u) ? 42u : 34u),
+            gain,
+            bar,
+            step);
+    }
+
+    if ((step & 3u) == 2u)
+        mono_silence(CH_MARIMBA);
+
+    if (step == 0u)
+        mono_note(CH_BASS, root, 42u, gain, bar, step);
+
+    if (step == 8u)
+        mono_note(CH_BASS, fifth, 34u, gain, bar, step);
+
+    if (step == 6u || step == 14u)
+        mono_silence(CH_BASS);
+}
+
+static void paperwork(
+    unsigned bar,
+    unsigned step,
+    int fuller,
+    float gain,
+    int include_percussion)
+{
+    uint8_t root = root_for_bar(bar);
+    uint8_t fifth = (uint8_t)(root + 7u);
+
+    if (step == 2u || step == 10u)
+        mono_note(
+            CH_PIZZ,
+            (uint8_t)(root + 12u),
+            fuller ? 31u : 25u,
+            gain,
+            bar,
+            step);
+
+    if (step == 6u || step == 14u)
+        mono_note(
+            CH_PIZZ,
+            (uint8_t)(fifth + 12u),
+            fuller ? 29u : 23u,
+            gain,
+            bar,
+            step);
+
+    if (step == 3u || step == 7u ||
+        step == 11u || step == 15u)
+        mono_silence(CH_PIZZ);
+
+    if (!include_percussion)
+        return;
+
+    if (step == 4u || step == 5u || step == 6u ||
+        step == 12u || step == 13u) {
+
+        uint8_t velocity =
+            scale7(fuller ? 32u : 23u, gain);
+
+        if (velocity)
+            send_raw(
+                (uint8_t)(0x90u | CH_DRUMS),
+                37u,
+                velocity);
+    }
+
+    if ((bar & 3u) == 3u && step == 14u) {
+        uint8_t velocity =
+            scale7(fuller ? 42u : 31u, gain);
+
+        if (velocity)
+            send_raw(
+                (uint8_t)(0x90u | CH_DRUMS),
+                76u,
+                velocity);
+    }
+}
+
+static void melody(
+    unsigned bar,
+    unsigned step,
+    int full,
+    float gain)
+{
+    static const uint8_t am[8] =
+        {69,72,76,71,72,69,67,64};
+
+    static const uint8_t bm[8] =
+        {71,74,78,73,74,71,69,66};
+
+    const uint8_t *notes =
+        ((bar / 2u) & 1u) ? bm : am;
+
+    unsigned phrase_bar = bar & 7u;
+    unsigned index;
+
+    if (!full &&
+        (phrase_bar == 3u || phrase_bar == 7u))
+        return;
+
+    if (step == 0u || step == 6u || step == 10u) {
+        index =
+            (phrase_bar * 2u +
+             (step == 0u ? 0u :
+              step == 6u ? 1u : 2u)) & 7u;
+
+        mono_note(
+            CH_CLARINET,
+            notes[index],
+            full ? 37u : 30u,
+            gain,
+            bar,
+            step);
+    }
+
+    if (step == 4u || step == 9u || step == 14u)
+        mono_silence(CH_CLARINET);
+}
+
+/* Pad is deliberately stable and quiet. */
+static void pad(unsigned bar, unsigned step, float gain)
+{
+    uint8_t root;
+
+    if (step != 0u)
+        return;
+
+    channel_silence(CH_PAD);
+
+    root = (uint8_t)(root_for_bar(bar) + 12u);
+
+    send_raw(
+        (uint8_t)(0x90u | CH_PAD),
+        root,
+        scale7(30u, gain));
+
+    send_raw(
+        (uint8_t)(0x90u | CH_PAD),
+        (uint8_t)(root + 3u),
+        scale7(24u, gain));
+
+    send_raw(
+        (uint8_t)(0x90u | CH_PAD),
+        (uint8_t)(root + 7u),
+        scale7(22u, gain));
+
+    if (bar >= 40u &&
+        (((bar - 40u) & 3u) == 3u)) {
+
+        send_raw(
+            (uint8_t)(0x90u | CH_PAD),
+            (uint8_t)(root + 1u),
+            scale7(14u, gain));
+    }
+}
+
+/*
+    The v0.7 staged reset.
+
+    There is deliberately no single "drop everything" moment.
+*/
+static void outro(unsigned bar, unsigned step)
+{
+    if (bar==580u && step==0u) {
+        channel_silence(CH_COUNTER);
+        channel_silence(CH_EXTRA_PIZZ);
+    }
+    if (bar < 584u) {
+        paperwork(bar,step,1,0.78f,1);
+        melody(bar,step,1,0.70f);
+        pad(bar,step,0.45f);
+    } else if (bar < 588u) {
+        if (bar==584u && step==0u) channel_silence(CH_PAD);
+        paperwork(bar,step,0,0.60f,1);
+        melody(bar,step,0,0.50f);
+    } else if (bar < 592u) {
+        if (bar==588u && step==0u) channel_silence(CH_CLARINET);
+        paperwork(bar,step,0,0.42f,1);
+    } else if (bar < 596u) {
+        paperwork(bar,step,0,0.24f,0);
+    } else if (bar==596u && step==0u) {
+        channel_silence(CH_PIZZ);
+    }
+}
+
+/* Five progressively richer additions atop the approved v0.7 notes.
+   They deliberately reuse its GM voices and stay below the main melody. */
+static void evolving_layers(unsigned bar,unsigned step)
+{
+    unsigned layers=layers_for_bar(bar);
+    uint8_t root=root_for_bar(bar);
+    if (layers>=1u && (step==2u || step==10u))
+        send_raw(0x99u,42u,14u);  /* stationery rustle / brush */
+    if (layers>=2u && (bar%4u)==1u && step==4u)
+        mono_note(CH_EXTRA_PIZZ,(uint8_t)(root+19u),24u,0.50f,bar,step);
+    if (layers>=3u && (bar%8u)==6u && step==8u)
+        mono_note(CH_COUNTER,(uint8_t)(root+24u),23u,0.45f,bar,step);
+    if (layers>=4u && (bar%8u)==4u && step==0u)
+        mono_note(CH_COUNTER,(uint8_t)(root+19u),26u,0.45f,bar,step);
+    if (step==6u || step==14u) mono_silence(CH_EXTRA_PIZZ);
+    if (step==12u) mono_silence(CH_COUNTER);
+    if (layers>=5u && (bar%4u)==2u && step==12u)
+        send_raw(0x99u,76u,19u); /* occasional soft office woodblock */
+}
+
+/* BF22: independent 32-bar, 110 BPM menu/completion scenes. Approved
+ * 600-bar gameplay and its Act/restoration corruption remain unchanged. */
+static void scene_note(uint8_t channel,uint8_t pitch,uint8_t velocity)
+{
+    if(g_note_active[channel])note_off(channel,g_last_note[channel]);
+    send_raw((uint8_t)(0x90u|channel),pitch,velocity);
+    g_last_note[channel]=pitch;g_note_active[channel]=1u;
+}
+
+/* I6 | V7/vi | vi7 | borrowed ivm6 | I6/4 | borrowed bVImaj7
+ * | ii7 | V7(b9). E7, Fm6 and Abmaj7 keep the routine suspicious. */
+static const uint8_t menu_bass[8]=
+    {36u,40u,45u,41u,43u,44u,38u,43u};
+static const uint8_t menu_chord[8][4]={
+    {60u,64u,67u,69u}, /* C6 */
+    {64u,68u,71u,74u}, /* E7 */
+    {57u,60u,64u,67u}, /* Am7 */
+    {53u,56u,60u,62u}, /* Fm6 */
+    {55u,60u,64u,67u}, /* C/G */
+    {56u,60u,63u,67u}, /* Abmaj7 */
+    {50u,53u,57u,60u}, /* Dm7 */
+    {55u,59u,62u,68u}  /* G7(b9) */
+};
+static const uint8_t menu_motif[8][5]={
+    {72u,76u,79u,76u,74u},
+    {71u,74u,80u,76u,74u},
+    {72u,76u,79u,76u,72u},
+    {72u,74u,80u,77u,72u},
+    {72u,76u,79u,76u,72u},
+    {72u,75u,79u,75u,72u},
+    {74u,77u,81u,77u,72u},
+    {71u,74u,80u,77u,71u}
+};
+static void menu_scene_step(unsigned absolute_step)
+{
+    unsigned bar=(absolute_step/F144_STEPS_PER_BAR)%F144_MENU_BARS;
+    unsigned step=absolute_step%F144_STEPS_PER_BAR;
+    unsigned chord=bar%8u;
+    int busy=bar>=8u && bar<24u;
+    uint8_t root=menu_bass[chord];
+
+    if(step==0u)
+    {
+        unsigned voice;
+        /* Release the previous chord before forming the next office drone. */
+        channel_silence(CH_PAD);
+        for(voice=0u;voice<(busy?4u:3u);++voice)
+        {
+            /* In the sparse G7(b9), keep the b9 in place of its fifth. */
+            unsigned chord_tone=(!busy&&chord==7u&&voice==2u)?3u:voice;
+            send_raw((uint8_t)(0x90u|CH_PAD),menu_chord[chord][chord_tone],
+                     (uint8_t)(voice==0u?23u:18u));
+        }
+    }
+    /* Four clipped quarter-note conveyor pulses, resolving G -> B -> C
+       across bars 32 and 1. */
+    if(step==0u||step==4u||step==8u||step==12u)
+    {
+        uint8_t pitch=step==0u?root:
+            (step==4u?(uint8_t)(root+7u):
+            (step==8u?(uint8_t)(root+12u):
+                (uint8_t)(menu_bass[(chord+1u)%8u]-1u)));
+        scene_note(CH_BASS,pitch,(uint8_t)(step==0u?59u:43u));
+        send_raw(0x99u,42u,(uint8_t)(busy?21u:16u)); /* clock tick */
+    }
+    if(step==3u||step==7u||step==11u||step==15u)
+        mono_silence(CH_BASS);
+
+    /* Staccato offbeat pizzicato gives the illusion of typing. */
+    if(step==2u||step==6u||step==10u||step==14u)
+    {
+        unsigned voice=step==2u?0u:(step==6u?2u:(step==10u?1u:3u));
+        scene_note(CH_PIZZ,(uint8_t)(menu_chord[chord][voice]+12u),
+                   (uint8_t)(busy?31u:25u));
+    }
+    if(step==3u||step==7u||step==11u||step==15u)
+        mono_silence(CH_PIZZ);
+
+    /* Identical three-note morning/evening motif, expanded to five notes
+       through the busy middle sixteen bars. */
+    if(step==0u||step==6u||step==10u||
+       (busy&&(step==3u||step==13u)))
+    {
+        unsigned slot=step==0u?0u:
+            (step==3u?1u:(step==6u?2u:(step==10u?3u:4u)));
+        scene_note(CH_MARIMBA,menu_motif[chord][slot],
+                   (uint8_t)(busy?44u:38u));
+    }
+    if(step==2u||step==5u||step==9u||step==12u||step==15u)
+        mono_silence(CH_MARIMBA);
+
+    /* Notification pings only once the department reaches full output. */
+    if(busy&&(bar&1u)!=0u&&(step==4u||step==12u))
+        scene_note(CH_COUNTER,
+                   (uint8_t)(menu_chord[chord][step==4u?1u:3u]+12u),
+                   23u);
+    if(step==6u||step==14u)mono_silence(CH_COUNTER);
+
+    /* Side-stick = rubber stamp, woodblock = end-of-form approval.
+       Channel 10 is the GM percussion channel, not a melodic program. */
+    if((busy&&(step==4u||step==12u))||
+       (!busy&&step==12u&&(bar<8u||(bar&1u)==0u)))
+        send_raw(0x99u,37u,(uint8_t)(busy?34u:24u));
+    if(step==14u&&(bar%4u)==3u)
+        send_raw(0x99u,76u,(uint8_t)(bar==31u?38u:25u));
+}
+/* Eight-bar progression, repeated four times:
+ * Cmaj9 | E7/G# | Am9 | Fm6 | C/G | Abmaj7 | Dm7 > G7sus4 | C6/9.
+ * Sparse voicings always retain each chord's identifying extension. */
+static const uint8_t completion_bass[8]=
+    {36u,44u,45u,41u,43u,44u,38u,36u};
+static const uint8_t completion_chords[8][5]={
+    {60u,64u,71u,74u,67u}, /* Cmaj9 */
+    {56u,59u,62u,64u,68u}, /* E7/G# */
+    {57u,60u,67u,71u,64u}, /* Am9 */
+    {53u,56u,60u,62u,65u}, /* Fm6 */
+    {55u,60u,64u,67u,72u}, /* C/G */
+    {56u,60u,63u,67u,72u}, /* Abmaj7 */
+    {50u,53u,60u,57u,65u}, /* Dm7 */
+    {60u,64u,69u,74u,67u}  /* C6/9 */
+};
+static const uint8_t completion_sus[5]=
+    {55u,60u,65u,62u,67u}; /* G7sus4, second half of seventh bar */
+static const uint8_t completion_motif[8][4]={
+    {72u,76u,79u,72u}, /* Main-menu C-E-G-E-C transformed into resolution */
+    {71u,74u,80u,71u},
+    {72u,76u,79u,72u},
+    {72u,77u,80u,72u},
+    {72u,76u,79u,72u},
+    {72u,75u,79u,72u},
+    {74u,77u,81u,74u},
+    {72u,76u,79u,72u}
+};
+static void completion_scene_step(unsigned absolute_step)
+{
+    unsigned bar=(absolute_step/F144_STEPS_PER_BAR)%F144_COMPLETION_BARS;
+    unsigned step=absolute_step%F144_STEPS_PER_BAR;
+    unsigned chord=bar%8u;
+    unsigned voice;
+    int rich=(bar>=8u&&bar<24u);
+    int closing=(bar>=24u);
+    const uint8_t *voicing=(chord==6u&&step>=8u)?
+        completion_sus:completion_chords[chord];
+
+    /* Slowly breathing string harmony, with a mid-bar ii -> V suspension.
+       At the final eighth bar the C6/9 resolves rather than hanging. */
+    if(step==0u||(chord==6u&&step==8u))
+    {
+        channel_silence(CH_PAD);
+        for(voice=0u;voice<(rich?5u:4u);++voice)
+            send_raw((uint8_t)(0x90u|CH_PAD),voicing[voice],
+                     (uint8_t)(voice==0u?
+                        (closing?17u:rich?25u:21u):
+                        (closing?12u:rich?19u:15u)));
+    }
+
+    /* Half-time roots and fifths: two gentle beats per bar, not a march. */
+    if(step==0u||step==8u)
+    {
+        uint8_t pitch=step==0u?completion_bass[chord]:
+            (chord==6u?43u:(uint8_t)(completion_bass[chord]+7u));
+        scene_note(CH_BASS,pitch,(uint8_t)(closing?27u:rich?36u:30u));
+        send_raw(0x99u,42u,(uint8_t)(closing?9u:rich?15u:11u));
+    }
+    if(step==6u||step==14u)mono_silence(CH_BASS);
+
+    /* The old typing mechanism survives, but its offbeats are sparse. */
+    if((step==6u||step==14u)||
+       (rich&&(step==2u||step==10u)))
+    {
+        if(!closing||(bar&1u)==0u||step==14u)
+        {
+            voice=step==2u?1u:(step==6u?2u:(step==10u?3u:0u));
+            scene_note(CH_PIZZ,
+                       (uint8_t)(completion_chords[chord][voice]+12u),
+                       (uint8_t)(closing?15u:rich?24u:18u));
+        }
+    }
+    if(step==3u||step==7u||step==11u||step==15u)
+        mono_silence(CH_PIZZ);
+
+    /* Entry-only approval: C5 / E5 / G5 / C6 / rubber stamp.
+       The flourish occupies the first bar, leaving the next 31 bars and
+       every repeat to follow the ordinary, gently resolved arrangement. */
+    if(bar==0u&&g_completion_intro_pending)
+    {
+        if(step==0u)scene_note(CH_MARIMBA,72u,39u);
+        if(step==2u)scene_note(CH_MARIMBA,76u,36u);
+        if(step==4u)
+        {
+            mono_silence(CH_MARIMBA);
+            scene_note(CH_COUNTER,79u,30u);
+        }
+        if(step==6u)scene_note(CH_CLARINET,84u,30u);
+        if(step==7u)mono_silence(CH_COUNTER);
+        if(step==8u)send_raw(0x99u,37u,30u);
+        if(step==10u)mono_silence(CH_CLARINET);
+        if(step==15u)g_completion_intro_pending=0u;
+    }
+    else
+    {
+        /* Quieter, slower restatement of the menu tune, expanded in
+           bars 9-24 and returning to a simple phrase in bars 25-32. */
+        if(step==0u||step==8u||step==12u||(rich&&step==4u))
+        {
+            voice=step==0u?0u:(step==4u?1u:(step==8u?2u:3u));
+            scene_note(CH_MARIMBA,completion_motif[chord][voice],
+                       (uint8_t)(closing?30u:rich?41u:35u));
+        }
+        if(step==7u||step==15u)mono_silence(CH_MARIMBA);
+    }
+
+    if(rich)
+    {
+        if((bar&1u)==0u&&step==4u)
+            scene_note(CH_EXTRA_PIZZ,menu_motif[chord][0],19u);
+        if(step==7u)mono_silence(CH_EXTRA_PIZZ);
+        if((bar&1u)==1u&&(step==4u||step==12u))
+            scene_note(CH_CLARINET,
+                       (uint8_t)(completion_motif[chord][step==4u?1u:2u]+12u),
+                       24u);
+        if(step==7u||step==15u)mono_silence(CH_CLARINET);
+        if((bar&1u)==0u&&step==12u)
+            scene_note(CH_COUNTER,
+                       (uint8_t)(completion_motif[chord][2]+12u),17u);
+        if(step==15u)mono_silence(CH_COUNTER);
+    }
+    else if(closing)
+    {
+        /* Last four bars recall the empty office after hours. The final
+           music-box ascent G5 A5 B5 C6 settles before the next Cmaj9. */
+        if(bar==31u&&(step==1u||step==5u||step==9u||step==12u))
+        {
+            uint8_t note=step==1u?79u:(step==5u?81u:
+                         (step==9u?83u:84u));
+            scene_note(CH_CLARINET,note,25u);
+        }
+        if(bar==28u&&step==8u)
+            scene_note(CH_COUNTER,79u,17u);
+        if(step==11u)mono_silence(CH_COUNTER);
+    }
+
+    /* End of each completed eight-bar form; one restrained final stamp.
+       A tiny woodblock punctuates the last bar without another big fanfare. */
+    if(chord==7u&&step==12u)
+        send_raw(0x99u,37u,(uint8_t)(closing?15u:rich?23u:18u));
+    if(bar==31u&&step==13u)
+        send_raw(0x99u,76u,15u);
+}
+
+static void process_step(unsigned absolute_step)
+{
+    if(g_scene==F144_MUSIC_MENU){menu_scene_step(absolute_step);return;}
+    if(g_scene==F144_MUSIC_COMPLETION){completion_scene_step(absolute_step);return;}
+    unsigned bar =
+        absolute_step / F144_STEPS_PER_BAR;
+
+    unsigned step =
+        absolute_step % F144_STEPS_PER_BAR;
+
+    enum F144Section sec =
+        section_for_bar(bar);
+
+    clockwork(bar, step);
+
+    if (sec == SEC_LAYER_A) {
+        paperwork(bar, step, 0, 1.0f, 1);
+    }
+    else if (sec == SEC_LAYER_B) {
+        paperwork(bar, step, 0, 1.0f, 1);
+        melody(bar, step, 0, 1.0f);
+    }
+    else if (sec == SEC_FULL) {
+        paperwork(bar, step, 1, 1.0f, 1);
+        melody(bar, step, 1, 1.0f);
+        pad(bar, step, 1.0f);
+    }
+    else if (sec == SEC_OUTRO) {
+        outro(bar, step);
+    }
+    if (sec != SEC_OUTRO && sec != SEC_INTRO)
+        evolving_layers(bar,step);
+}
+
+int F144_AudioInit(void)
+{
+    MMRESULT r;
+    MIDIOUTCAPSA caps;
+    UINT id = 0u;
+
+    if (g_available)
+        return 1;
+
+    r = midiOutOpen(
+        &g_out,
+        MIDI_MAPPER,
+        0,
+        0,
+        CALLBACK_NULL);
+
+    if (r != MMSYSERR_NOERROR) {
+        strcpy_s(
+            g_device_name,
+            sizeof(g_device_name),
+            "MIDI_MAPPER open failed");
+
+        return 0;
+    }
+
+    g_available = 1;
+
+    if (midiOutGetID(g_out, &id) == MMSYSERR_NOERROR &&
+        midiOutGetDevCapsA(
+            id, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
+
+        strncpy_s(
+            g_device_name,
+            sizeof(g_device_name),
+            caps.szPname,
+            _TRUNCATE);
+    }
+    else {
+        strcpy_s(
+            g_device_name,
+            sizeof(g_device_name),
+            "MIDI_MAPPER");
+    }
+
+    program(CH_MARIMBA, 12u);
+    program(CH_BASS, 32u);
+    program(CH_PIZZ, 45u);
+    program(CH_CLARINET, 71u);
+    program(CH_PAD, 48u);
+    program(CH_COUNTER, 71u);
+    program(CH_EXTRA_PIZZ, 45u);
+
+    apply_master_volume();
+
+    return 1;
+}
+
+void F144_AudioShutdown(void)
+{
+    if (!g_available)
+        return;
+
+    F144_MusicStop();
+    midiOutReset(g_out);
+    midiOutClose(g_out);
+
+    g_out = NULL;
+    g_available = 0;
+}
+
+void F144_MusicRestart(void)
+{
+    if (!g_available)
+        return;
+
+    if(g_scene==F144_MUSIC_COMPLETION&&!g_playing)
+        g_completion_intro_pending=1u;
+    all_notes_off();
+    apply_master_volume();
+
+    g_step = 0u;
+    g_accum = 0.0;
+    g_playing = 1;
+
+    process_step(0u);
+}
+
+void F144_MusicSeekBar(unsigned bar)
+{
+    if (!g_available) return;
+    all_notes_off();
+    /* Seek within the selected cue's own loop, never the gameplay period. */
+    {
+        unsigned bars=g_scene==F144_MUSIC_MENU?F144_MENU_BARS:
+            (g_scene==F144_MUSIC_COMPLETION?F144_COMPLETION_BARS:600u);
+        g_step=(bar%bars)*F144_STEPS_PER_BAR;
+        /* Seeking is a debug transport action, not a new completion. */
+        g_completion_intro_pending=0u;
+    }
+    g_accum = 0.0;
+    g_playing = 1;
+    process_step(g_step);
+}
+
+void F144_MusicStop(void)
+{
+    g_playing = 0;
+    g_completion_intro_pending=0u;
+    all_notes_off();
+}
+
+static float g_tempo_scale=1.0f;
+static float g_tempo_target=1.0f;
+void F144_MusicSetTempoPercent(unsigned percent)
+{
+    if(percent==0U)percent=100U;
+    if(percent<40U)percent=40U;
+    if(percent>100U)percent=100U;
+    g_tempo_target=(float)percent/100.0f;
+}
+float F144_MusicGetTempoScale(void){return g_tempo_scale;}
+
+void F144_AudioUpdate(double dt_seconds)
+{
+    if (dt_seconds < 0.0)
+        return;
+
+    if (dt_seconds > 0.5)
+        dt_seconds = 0.5;
+
+    /* Slew the scheduler, leaving notes, composition and Act corruption intact. */
+    {
+        float target=g_scene==F144_MUSIC_GAMEPLAY?g_tempo_target:1.0f;
+        float delta=(float)dt_seconds*2.0f;
+        if(g_tempo_scale<target) {
+            g_tempo_scale+=delta;
+            if(g_tempo_scale>target)g_tempo_scale=target;
+        } else if(g_tempo_scale>target) {
+            g_tempo_scale-=delta;
+            if(g_tempo_scale<target)g_tempo_scale=target;
+        }
+    }
+    if (!g_available || !g_playing)return;
+    g_accum += dt_seconds*(g_scene==F144_MUSIC_GAMEPLAY?g_tempo_scale:1.0f);
+
+    /* The gameplay cadence remains exactly the approved 80 BPM. */
+    {
+        double seconds_per_step=g_scene==F144_MUSIC_MENU
+            ?(60.0/F144_MENU_BPM/4.0):
+            (g_scene==F144_MUSIC_COMPLETION?(60.0/F144_COMPLETION_BPM/4.0):
+                F144_STEP_SECONDS);
+        while (g_accum >= seconds_per_step) {
+        g_accum -= seconds_per_step;
+
+        ++g_step;
+
+        if (g_step >= (g_scene==F144_MUSIC_MENU?F144_MENU_TOTAL_STEPS:
+                       (g_scene==F144_MUSIC_COMPLETION?
+                        F144_COMPLETION_TOTAL_STEPS:F144_TOTAL_STEPS))) {
+            all_notes_off();
+            apply_master_volume();
+            g_step = 0u;
+        }
+
+        process_step(g_step);
+        }
+    }
+}
+
+int F144_AudioIsAvailable(void)
+{
+    return g_available;
+}
+
+unsigned F144_AudioDeviceCount(void)
+{
+    return (unsigned)midiOutGetNumDevs();
+}
+
+const char *F144_AudioDeviceName(void)
+{
+    return g_device_name;
+}

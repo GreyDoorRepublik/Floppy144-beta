@@ -1,0 +1,129 @@
+/*
+ * Floppy//144 - record catalogue interface
+ *
+ * Provides the shared browser used by restored collections. The catalogue
+ * generates record listings and opens the few records recovered in full.
+ */
+
+#pragma once
+
+#include "floppy144_draw.h"
+
+#include "floppy144_collection.h"
+#include "floppy144_run_state.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Catalogue-local state
+ *
+ * collection selects the active archive vocabulary and authored records.
+ * selected_index is the highlighted record, top_index controls scrolling,
+ * and document_open switches between list and document views.
+ */
+
+typedef struct Floppy144CatalogueState
+{
+    Floppy144CollectionId collection;
+    uint32_t recovery_seed; /* transient presentation seed */
+    const Floppy144RunState *run_state; /* transient BF34 view binding */
+    uint32_t selected_index;
+    uint32_t top_index;
+
+    /*
+     * Zero-based wrapped body line at the top of the document viewport.
+     * List navigation and document scrolling deliberately keep separate state.
+     */
+    uint32_t document_scroll_line;
+    bool document_open;
+} Floppy144CatalogueState;
+
+/*
+ * Catalogue operations
+ *
+ * Reset opens a collection at its first record. Move and Page navigate.
+ * Authored records obtain their metadata and effects from the document
+ * registry rather than exposing collection-specific queries here.
+ */
+
+void Floppy144CatalogueBuildRecordForSeed(
+    Floppy144CollectionId collection, uint32_t index, uint32_t recovery_seed,
+    char *record_id, size_t record_id_size,
+    char *title, size_t title_size
+);
+
+void Floppy144CatalogueBuildRecord(
+    Floppy144CollectionId collection,
+    uint32_t index,
+    char *record_id,
+    size_t record_id_size,
+    char *title,
+    size_t title_size
+);
+
+/*
+ * Resolve one complete player-facing record ID back to its catalogue
+ * collection and zero-based record index. The same generated/overridden IDs
+ * used by LIST and the document viewer are authoritative here.
+ */
+bool Floppy144CatalogueFindRecord(
+    const char *record_id,
+    Floppy144CollectionId *collection,
+    uint32_t *record_index
+);
+/* BF31: authoritative display-only allocation, zero when size is hidden. */
+uint32_t Floppy144CatalogueDocumentSizeBytes(
+    const Floppy144RunState *run_state, Floppy144CollectionId collection,
+    uint32_t record_index
+);
+
+void Floppy144CatalogueReset(
+    Floppy144CatalogueState *catalogue,
+    Floppy144CollectionId collection
+);
+
+void Floppy144CatalogueMove(
+    Floppy144CatalogueState *catalogue,
+    int32_t direction
+);
+
+void Floppy144CataloguePage(
+    Floppy144CatalogueState *catalogue,
+    int32_t direction
+);
+
+bool Floppy144CatalogueOpenRecord(
+    Floppy144CatalogueState *catalogue,
+    Floppy144CollectionId collection,
+    uint32_t record_index
+);
+void Floppy144CatalogueOpenDocument(
+    Floppy144CatalogueState *catalogue
+);
+
+void Floppy144CatalogueCloseDocument(
+    Floppy144CatalogueState *catalogue
+);
+
+/*
+ * Scroll an open authored document by wrapped text lines.
+ *
+ * Movement is clamped between the first line and the last position that keeps
+ * a full 13-line viewport visible. Non-authored and short documents do not
+ * scroll.
+ */
+void Floppy144CatalogueScrollDocument(
+    Floppy144CatalogueState *catalogue,
+    int32_t direction
+);
+
+bool Floppy144CatalogueDocumentOpen(
+    const Floppy144CatalogueState *catalogue
+);
+
+void Floppy144CatalogueDraw(
+    Floppy144Surface *engine,
+    const Floppy144CatalogueState *catalogue
+);
