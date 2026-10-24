@@ -180,8 +180,5 @@ Unfortunately, the appropriate form has been temporarily misfiled.
 
 **FLOPPY//144**
 
-*GREY DOOR REPUBLIK*
-
-© MMXXVI
-
+©MMXXVI *GREY DOOR REPUBLIK*
 **GDR NOTICE:** This connection may be monitored, recorded, reconstructed or retrospectively denied.
